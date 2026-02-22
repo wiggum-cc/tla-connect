@@ -39,11 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - RPC session cleanup always runs even on error
 - NDJSON validation rejects floats, validates consistent schema, escapes strings
 
-## [0.1.0] - Unreleased
+## [0.0.2] - Unreleased
 
 ### Added
 
-- Initial release
+- Initial public release
 - Three approaches for TLA+/Rust integration:
   1. Batch trace replay (Apalache CLI → ITF → Driver)
   2. Interactive symbolic testing (JSON-RPC to Apalache explorer)
@@ -53,5 +53,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ITF trace parsing via `itf` crate
 - State comparison with unified diff output
 
-[Unreleased]: https://github.com/wiggum-cc/tla-connect/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/wiggum-cc/tla-connect/releases/tag/v0.1.0
+[Unreleased]: https://github.com/wiggum-cc/tla-connect/compare/v0.0.2...HEAD
+[0.0.2]: https://github.com/wiggum-cc/tla-connect/releases/tag/v0.0.2

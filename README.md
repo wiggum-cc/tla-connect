@@ -92,10 +92,10 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tla-connect = "0.1"
+tla-connect = "0.0.2"
 
 # For interactive RPC testing:
-# tla-connect = { version = "0.1", features = ["rpc"] }
+# tla-connect = { version = "0.0.2", features = ["rpc"] }
 ```
 
 ## Quick Start
