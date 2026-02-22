@@ -2,6 +2,39 @@
 //!
 //! Mirrors quint-connect's `Driver`/`State`/`Step` pattern, adapted for
 //! TLA+ ITF traces produced by Apalache.
+//!
+//! # Example
+//!
+//! ```
+//! use tla_connect::{Driver, State, Step, DriverError, switch};
+//! use serde::Deserialize;
+//!
+//! #[derive(Debug, PartialEq, Deserialize)]
+//! struct CounterState {
+//!     counter: i64,
+//! }
+//!
+//! struct CounterDriver {
+//!     value: i64,
+//! }
+//!
+//! impl State<CounterDriver> for CounterState {
+//!     fn from_driver(driver: &CounterDriver) -> Result<Self, DriverError> {
+//!         Ok(CounterState { counter: driver.value })
+//!     }
+//! }
+//!
+//! impl Driver for CounterDriver {
+//!     type State = CounterState;
+//!
+//!     fn step(&mut self, step: &Step) -> Result<(), DriverError> {
+//!         switch!(step {
+//!             "init" => { self.value = 0; },
+//!             "increment" => { self.value += 1; },
+//!         })
+//!     }
+//! }
+//! ```
 
 use crate::error::DriverError;
 use serde::de::DeserializeOwned;
@@ -13,6 +46,7 @@ use std::fmt::Debug;
 /// variables (`action_taken`, `nondet_picks`) that identify which action
 /// was taken and any nondeterministic choices.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Step {
     /// The TLA+ action that was taken (e.g., "request_success", "tick").
     pub action_taken: String,
@@ -57,6 +91,51 @@ pub trait State<D>: PartialEq + DeserializeOwned + Debug {
     fn from_spec(value: &itf::Value) -> Result<Self, DriverError> {
         Self::deserialize(value.clone()).map_err(|e| DriverError::StateExtraction(e.to_string()))
     }
+
+    /// Generate a human-readable diff between two states.
+    ///
+    /// The default implementation uses Debug formatting with unified diff.
+    /// Override this for custom diff output (e.g., field-by-field comparison).
+    fn diff(&self, other: &Self) -> String {
+        use std::fmt::Write;
+        let self_str = format!("{self:#?}");
+        let other_str = format!("{other:#?}");
+
+        let mut output = String::new();
+        let self_lines: Vec<&str> = self_str.lines().collect();
+        let other_lines: Vec<&str> = other_str.lines().collect();
+
+        for (i, (a, b)) in self_lines.iter().zip(other_lines.iter()).enumerate() {
+            if a != b {
+                let _ = writeln!(output, "  line {}: {} -> {}", i + 1, a.trim(), b.trim());
+            }
+        }
+
+        if self_lines.len() != other_lines.len() {
+            let _ = writeln!(
+                output,
+                "  (line count differs: {} vs {})",
+                self_lines.len(),
+                other_lines.len()
+            );
+        }
+
+        if output.is_empty() {
+            output = "(states appear equal but PartialEq returned false)".to_string();
+        }
+
+        output
+    }
+}
+
+/// Helper to create a unified diff between two Debug-formatted values.
+///
+/// Useful for implementing custom `State::diff` methods.
+#[cfg(feature = "replay")]
+pub fn debug_diff<T: Debug, U: Debug>(left: &T, right: &U) -> String {
+    let left_str = format!("{left:#?}");
+    let right_str = format!("{right:#?}");
+    crate::replay::unified_diff(&left_str, &right_str)
 }
 
 /// Dispatch a TLA+ action to the corresponding Rust code.

@@ -2,6 +2,22 @@
 //!
 //! Invokes Apalache CLI to generate ITF traces from TLA+ specs via bounded
 //! model checking or random simulation.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use tla_connect::{generate_traces, ApalacheConfig, ApalacheMode};
+//!
+//! let config = ApalacheConfig::builder()
+//!     .spec("specs/Counter.tla")
+//!     .inv("TraceComplete")
+//!     .max_traces(10)
+//!     .mode(ApalacheMode::Simulate)
+//!     .build();
+//!
+//! let generated = generate_traces(&config)?;
+//! println!("Generated {} traces", generated.traces.len());
+//! ```
 
 use crate::error::{Error, TraceGenError};
 use std::path::{Path, PathBuf};
@@ -9,6 +25,7 @@ use tracing::{debug, info};
 
 /// Configuration for Apalache trace generation.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ApalacheConfig {
     /// Path to the TLA+ spec file.
     pub spec: PathBuf,
@@ -63,8 +80,97 @@ impl Default for ApalacheConfig {
     }
 }
 
+impl ApalacheConfig {
+    pub fn builder() -> ApalacheConfigBuilder {
+        ApalacheConfigBuilder::default()
+    }
+}
+
+#[derive(Default)]
+pub struct ApalacheConfigBuilder {
+    spec: Option<PathBuf>,
+    inv: Option<String>,
+    max_traces: Option<usize>,
+    max_length: Option<usize>,
+    view: Option<String>,
+    cinit: Option<String>,
+    mode: Option<ApalacheMode>,
+    apalache_bin: Option<String>,
+    out_dir: Option<PathBuf>,
+    keep_outputs: Option<bool>,
+}
+
+impl ApalacheConfigBuilder {
+    pub fn spec(mut self, path: impl Into<PathBuf>) -> Self {
+        self.spec = Some(path.into());
+        self
+    }
+
+    pub fn inv(mut self, inv: impl Into<String>) -> Self {
+        self.inv = Some(inv.into());
+        self
+    }
+
+    pub fn max_traces(mut self, n: usize) -> Self {
+        self.max_traces = Some(n);
+        self
+    }
+
+    pub fn max_length(mut self, n: usize) -> Self {
+        self.max_length = Some(n);
+        self
+    }
+
+    pub fn view(mut self, view: impl Into<String>) -> Self {
+        self.view = Some(view.into());
+        self
+    }
+
+    pub fn cinit(mut self, cinit: impl Into<String>) -> Self {
+        self.cinit = Some(cinit.into());
+        self
+    }
+
+    pub fn mode(mut self, mode: ApalacheMode) -> Self {
+        self.mode = Some(mode);
+        self
+    }
+
+    pub fn apalache_bin(mut self, bin: impl Into<String>) -> Self {
+        self.apalache_bin = Some(bin.into());
+        self
+    }
+
+    pub fn out_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.out_dir = Some(dir.into());
+        self
+    }
+
+    pub fn keep_outputs(mut self, keep: bool) -> Self {
+        self.keep_outputs = Some(keep);
+        self
+    }
+
+    pub fn build(self) -> ApalacheConfig {
+        let defaults = ApalacheConfig::default();
+        ApalacheConfig {
+            spec: self.spec.unwrap_or(defaults.spec),
+            inv: self.inv.unwrap_or(defaults.inv),
+            max_traces: self.max_traces.unwrap_or(defaults.max_traces),
+            max_length: self.max_length.unwrap_or(defaults.max_length),
+            view: self.view.or(defaults.view),
+            cinit: self.cinit.or(defaults.cinit),
+            mode: self.mode.unwrap_or(defaults.mode),
+            apalache_bin: self.apalache_bin.unwrap_or(defaults.apalache_bin),
+            out_dir: self.out_dir.or(defaults.out_dir),
+            keep_outputs: self.keep_outputs.unwrap_or(defaults.keep_outputs),
+        }
+    }
+}
+
 /// Apalache execution mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ApalacheMode {
     /// Bounded model checking (systematic exploration).
     /// Uses `apalache-mc check`. Exhaustive up to `max_length` steps.
@@ -79,6 +185,7 @@ pub enum ApalacheMode {
 ///
 /// The temp directory (if created) is cleaned up when this struct is dropped,
 /// unless `keep_outputs` was set in the config.
+#[non_exhaustive]
 pub struct GeneratedTraces {
     /// The generated ITF traces.
     pub traces: Vec<itf::Trace<itf::Value>>,
@@ -110,6 +217,7 @@ impl GeneratedTraces {
 ///
 /// Returns a `GeneratedTraces` struct containing the parsed traces and
 /// owning the output directory (cleaned up on drop unless persisted).
+#[must_use = "contains generated traces that should be used for replay"]
 pub fn generate_traces(config: &ApalacheConfig) -> Result<GeneratedTraces, Error> {
     let (out_dir, temp) = match &config.out_dir {
         Some(dir) => (dir.clone(), None),
@@ -223,6 +331,24 @@ fn collect_itf_traces(out_dir: &Path) -> Result<Vec<itf::Trace<itf::Value>>, Err
 
     info!(count = traces.len(), "Collected ITF traces");
     Ok(traces)
+}
+
+impl From<PathBuf> for ApalacheConfig {
+    fn from(spec: PathBuf) -> Self {
+        Self {
+            spec,
+            ..Default::default()
+        }
+    }
+}
+
+impl From<&str> for ApalacheConfig {
+    fn from(spec: &str) -> Self {
+        Self {
+            spec: PathBuf::from(spec),
+            ..Default::default()
+        }
+    }
 }
 
 /// Simple recursive directory walker.

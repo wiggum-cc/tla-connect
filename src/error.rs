@@ -8,6 +8,7 @@ use thiserror::Error;
 
 /// Top-level error type for tla-connect operations.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Error during ITF trace replay.
     #[error("Replay error: {0}")]
@@ -41,6 +42,7 @@ pub enum Error {
 
 /// Error during ITF trace replay.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ReplayError {
     /// Failed to extract MBT variables from ITF state.
     #[error("Trace {trace}, state {state}: failed to extract MBT vars: {reason}")]
@@ -99,6 +101,7 @@ pub enum ReplayError {
 
 /// Error during Apalache trace generation.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum TraceGenError {
     /// TLA+ spec file not found.
     #[error("TLA+ spec not found: {0}")]
@@ -131,6 +134,7 @@ pub enum TraceGenError {
 
 /// Error during trace validation (Approach 3).
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ValidationError {
     /// TraceSpec file not found.
     #[error("TraceSpec not found: {0}")]
@@ -207,6 +211,7 @@ pub enum ValidationError {
 /// Error during RPC communication with Apalache server.
 #[cfg(feature = "rpc")]
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RpcError {
     /// Failed to create HTTP client.
     #[error("Failed to create HTTP client: {0}")]
@@ -298,6 +303,7 @@ pub enum RpcError {
 
 /// Error during driver step execution.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum DriverError {
     /// Unknown action encountered.
     #[error("Unknown action: {0}")]

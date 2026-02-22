@@ -1,6 +1,6 @@
 [package]
 name = "tla-connect"
-version = "0.1.0"
+version = "0.0.2"
 description = "TLA+/Apalache integration for model-based testing"
 authors = ["nxbrain"]
 edition = "2021"
@@ -28,8 +28,11 @@ trace-validation = ["dep:tempfile"]
 # Interactive symbolic testing via Apalache JSON-RPC server
 rpc = ["dep:reqwest", "dep:tokio", "dep:rand", "dep:base64"]
 
+# Parallel trace replay using rayon
+parallel = ["dep:rayon"]
+
 # Enable all features
-full = ["replay", "trace-gen", "trace-validation", "rpc"]
+full = ["replay", "trace-gen", "trace-validation", "rpc", "parallel"]
 
 [dependencies]
 # ITF trace format deserialization
@@ -63,5 +66,9 @@ rand = { version = "0.9", optional = true }
 # Base64 encoding for Apalache server spec loading (rpc feature)
 base64 = { version = "0.22", optional = true }
 
+# Parallel trace replay (parallel feature)
+rayon = { version = "1.10", optional = true }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+wiremock = "0.6"

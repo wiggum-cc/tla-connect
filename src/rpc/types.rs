@@ -56,7 +56,7 @@ impl std::fmt::Display for JsonRpcError {
 // ---------------------------------------------------------------------------
 
 /// Parameters for `loadSpec`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LoadSpecParams {
     /// Base64-encoded TLA+ source files.
     pub sources: Vec<String>,

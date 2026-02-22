@@ -10,6 +10,64 @@ TLA+/Apalache integration for model-based testing in Rust.
 - **Model-based testing**: Generate test cases from TLA+ models
 - **Counterexample replay**: Automatically reproduce bugs found by model checkers
 
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph TLA["TLA+ Specification"]
+        Spec[MySpec.tla]
+        TraceSpec[TraceSpec.tla]
+    end
+
+    subgraph Apalache["Apalache Model Checker"]
+        CLI[apalache-mc CLI]
+        RPC[JSON-RPC Server]
+    end
+
+    subgraph Rust["Rust Implementation"]
+        Driver[Driver trait]
+        State[State trait]
+        Emitter[StateEmitter]
+    end
+
+    subgraph Traces["Trace Formats"]
+        ITF[ITF Traces]
+        NDJSON[NDJSON Trace]
+    end
+
+    %% Approach 1: Batch Replay
+    Spec -->|"generate_traces()"| CLI
+    CLI -->|produces| ITF
+    ITF -->|"replay_traces()"| Driver
+    Driver -->|compared via| State
+
+    %% Approach 2: Interactive RPC  
+    Spec -->|"interactive_test()"| RPC
+    RPC <-->|step-by-step| Driver
+
+    %% Approach 3: Post-hoc Validation
+    Driver -->|records| Emitter
+    Emitter -->|writes| NDJSON
+    NDJSON -->|"validate_trace()"| CLI
+    CLI -->|checks against| TraceSpec
+
+    classDef tla fill:#e1f5fe,stroke:#01579b
+    classDef apalache fill:#fff3e0,stroke:#e65100
+    classDef rust fill:#e8f5e9,stroke:#2e7d32
+    classDef trace fill:#fce4ec,stroke:#880e4f
+
+    class Spec,TraceSpec tla
+    class CLI,RPC apalache
+    class Driver,State,Emitter rust
+    class ITF,NDJSON trace
+```
+
+| Approach | Direction | Catches |
+|----------|-----------|---------|
+| 1. Batch Replay | Spec → Implementation | Implementation doesn't handle a case the spec allows |
+| 2. Interactive RPC | Spec ↔ Implementation | Implementation doesn't handle a case the spec allows |
+| 3. Post-hoc Validation | Implementation → Spec | Implementation does something the spec doesn't allow |
+
 ## Features
 
 - ITF (Informal Trace Format) parsing and validation
@@ -25,6 +83,7 @@ TLA+/Apalache integration for model-based testing in Rust.
 - `trace-gen` (default): Apalache CLI trace generation
 - `trace-validation` (default): Post-hoc NDJSON trace validation
 - `rpc`: Interactive symbolic testing via Apalache JSON-RPC
+- `parallel`: Parallel trace replay using rayon
 - `full`: Enable all features
 
 ## Installation
@@ -77,12 +136,12 @@ impl Driver for MyDriver {
 }
 
 fn main() -> Result<(), Error> {
-    let generated = generate_traces(&ApalacheConfig {
-        spec: "specs/Counter.tla".into(),
-        inv: "TraceComplete",
-        ..Default::default()
-    })?;
+    let config = ApalacheConfig::builder()
+        .spec("specs/Counter.tla")
+        .inv("TraceComplete")
+        .build();
 
+    let generated = generate_traces(&config)?;
     replay_traces(|| MyDriver { counter: 0 }, &generated.traces)?;
     Ok(())
 }
@@ -99,17 +158,14 @@ use tla_connect::*;
 async fn main() -> Result<(), Error> {
     let client = ApalacheRpcClient::new("http://localhost:8822").await?;
 
-    interactive_test(
-        || MyDriver::default(),
-        &client,
-        &InteractiveConfig {
-            spec: "specs/Counter.tla".into(),
-            num_runs: 100,
-            max_steps: 50,
-            seed: Some(42), // Reproducible runs
-            ..Default::default()
-        },
-    ).await?;
+    let config = InteractiveConfig::builder()
+        .spec("specs/Counter.tla")
+        .num_runs(100)
+        .max_steps(50)
+        .seed(42) // Reproducible runs
+        .build();
+
+    interactive_test(|| MyDriver::default(), &client, &config).await?;
 
     Ok(())
 }
@@ -138,13 +194,11 @@ fn main() -> Result<(), Error> {
     emitter.finish()?;
 
     // Validate against TLA+ spec
-    let result = validate_trace(
-        &TraceValidatorConfig {
-            trace_spec: "specs/CounterTrace.tla".into(),
-            ..Default::default()
-        },
-        Path::new("trace.ndjson"),
-    )?;
+    let config = TraceValidatorConfig::builder()
+        .trace_spec("specs/CounterTrace.tla")
+        .build();
+
+    let result = validate_trace(&config, Path::new("trace.ndjson"))?;
 
     match result {
         TraceResult::Valid => println!("Trace is valid!"),

@@ -22,14 +22,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     record_execution(trace_path)?;
 
     println!("Validating trace against TLA+ spec...");
-    let config = TraceValidatorConfig {
-        trace_spec: "specs/CounterTrace.tla".into(),
-        init: "TraceInit".into(),
-        next: "TraceNext".into(),
-        inv: "TraceFinished".into(),
-        cinit: "TraceConstInit".into(),
-        ..Default::default()
-    };
+    let config = TraceValidatorConfig::builder()
+        .trace_spec("specs/CounterTrace.tla")
+        .init("TraceInit")
+        .next("TraceNext")
+        .inv("TraceFinished")
+        .cinit("TraceConstInit")
+        .build();
 
     let result = validate_trace(&config, trace_path)?;
 
@@ -39,6 +38,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         TraceResult::Invalid { reason } => {
             println!("✗ Trace is invalid: {reason}");
+            std::process::exit(1);
+        }
+        _ => {
+            println!("✗ Unexpected result variant");
             std::process::exit(1);
         }
     }

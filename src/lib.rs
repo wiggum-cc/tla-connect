@@ -25,6 +25,7 @@
 //! - `trace-gen` (default): Apalache CLI trace generation
 //! - `trace-validation` (default): Post-hoc NDJSON trace validation
 //! - `rpc`: Interactive symbolic testing via Apalache JSON-RPC
+//! - `parallel`: Parallel trace replay using rayon
 //! - `full`: Enable all features
 //!
 //! # Quick Start (Approach 1)
@@ -75,22 +76,37 @@ pub mod trace_validation;
 
 // Re-export core types (always available)
 pub use driver::{Driver, State, Step};
+#[cfg(feature = "replay")]
+pub use driver::debug_diff;
 pub use error::{DriverError, Error, ReplayError, TlaResult, TraceGenError, ValidationError};
 
 // Re-export replay types
 #[cfg(feature = "replay")]
-pub use replay::{replay_trace_str, replay_traces};
+pub use replay::{
+    replay_trace_str, replay_traces, replay_traces_with_progress, ReplayProgress, ReplayProgressFn,
+    ReplayStats,
+};
+
+#[cfg(feature = "parallel")]
+pub use replay::replay_traces_parallel;
 
 // Re-export RPC types
 #[cfg(feature = "rpc")]
 pub use error::RpcError;
 #[cfg(feature = "rpc")]
-pub use rpc::{interactive_test, ApalacheRpcClient, InteractiveConfig};
+pub use rpc::{
+    interactive_test, interactive_test_with_progress, ApalacheRpcClient, InteractiveConfig,
+    InteractiveConfigBuilder, InteractiveProgress, InteractiveProgressFn, InteractiveStats,
+    RetryConfig,
+};
 
 // Re-export trace generation types
 #[cfg(feature = "trace-gen")]
-pub use trace_gen::{generate_traces, ApalacheConfig, ApalacheMode, GeneratedTraces};
+pub use trace_gen::{generate_traces, ApalacheConfig, ApalacheConfigBuilder, ApalacheMode, GeneratedTraces};
 
 // Re-export trace validation types
 #[cfg(feature = "trace-validation")]
-pub use trace_validation::{validate_trace, StateEmitter, TraceResult, TraceValidatorConfig};
+pub use trace_validation::{validate_trace, StateEmitter, TraceResult, TraceValidatorConfig, TraceValidatorConfigBuilder};
+#[cfg(feature = "trace-validation")]
+#[doc(hidden)]
+pub use trace_validation::ndjson_to_tla_module;

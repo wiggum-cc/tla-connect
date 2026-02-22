@@ -54,14 +54,13 @@ impl Driver for CounterDriver {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = ApalacheConfig {
-        spec: "specs/Counter.tla".into(),
-        inv: "TraceComplete".into(),
-        max_traces: 10,
-        max_length: 20,
-        mode: ApalacheMode::Simulate,
-        ..Default::default()
-    };
+    let config = ApalacheConfig::builder()
+        .spec("specs/Counter.tla")
+        .inv("TraceComplete")
+        .max_traces(10)
+        .max_length(20)
+        .mode(ApalacheMode::Simulate)
+        .build();
 
     println!("Generating traces from TLA+ spec...");
     let generated = generate_traces(&config)?;

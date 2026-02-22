@@ -10,6 +10,8 @@ use tracing::{debug, info};
 
 /// Result of trace validation.
 #[derive(Debug)]
+#[non_exhaustive]
+#[must_use = "trace validation result should be checked"]
 pub enum TraceResult {
     /// The trace is a valid behavior of the specification.
     /// Apalache violated the `TraceFinished` invariant (meaning the full trace
@@ -25,6 +27,7 @@ pub enum TraceResult {
 
 /// Configuration for Apalache-based trace validation.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TraceValidatorConfig {
     /// Path to the TLA+ TraceSpec file.
     pub trace_spec: PathBuf,
@@ -59,11 +62,72 @@ impl Default for TraceValidatorConfig {
     }
 }
 
+impl TraceValidatorConfig {
+    pub fn builder() -> TraceValidatorConfigBuilder {
+        TraceValidatorConfigBuilder::default()
+    }
+}
+
+#[derive(Default)]
+pub struct TraceValidatorConfigBuilder {
+    trace_spec: Option<PathBuf>,
+    init: Option<String>,
+    next: Option<String>,
+    inv: Option<String>,
+    cinit: Option<String>,
+    apalache_bin: Option<String>,
+}
+
+impl TraceValidatorConfigBuilder {
+    pub fn trace_spec(mut self, path: impl Into<PathBuf>) -> Self {
+        self.trace_spec = Some(path.into());
+        self
+    }
+
+    pub fn init(mut self, init: impl Into<String>) -> Self {
+        self.init = Some(init.into());
+        self
+    }
+
+    pub fn next(mut self, next: impl Into<String>) -> Self {
+        self.next = Some(next.into());
+        self
+    }
+
+    pub fn inv(mut self, inv: impl Into<String>) -> Self {
+        self.inv = Some(inv.into());
+        self
+    }
+
+    pub fn cinit(mut self, cinit: impl Into<String>) -> Self {
+        self.cinit = Some(cinit.into());
+        self
+    }
+
+    pub fn apalache_bin(mut self, bin: impl Into<String>) -> Self {
+        self.apalache_bin = Some(bin.into());
+        self
+    }
+
+    pub fn build(self) -> TraceValidatorConfig {
+        let defaults = TraceValidatorConfig::default();
+        TraceValidatorConfig {
+            trace_spec: self.trace_spec.unwrap_or(defaults.trace_spec),
+            init: self.init.unwrap_or(defaults.init),
+            next: self.next.unwrap_or(defaults.next),
+            inv: self.inv.unwrap_or(defaults.inv),
+            cinit: self.cinit.unwrap_or(defaults.cinit),
+            apalache_bin: self.apalache_bin.unwrap_or(defaults.apalache_bin),
+        }
+    }
+}
+
 /// Validates Rust execution traces against TLA+ specs using Apalache.
 ///
 /// Uses the "inverted invariant" technique: the TraceSpec defines a
 /// `TraceFinished` invariant that is violated when the entire trace has
 /// been consumed. If Apalache reports a violation, the trace is valid.
+#[must_use = "validation result should be checked"]
 pub fn validate_trace(config: &TraceValidatorConfig, trace_file: &Path) -> Result<TraceResult, Error> {
     let trace_spec = config
         .trace_spec
@@ -183,7 +247,8 @@ fn parse_apalache_output(
 }
 
 /// Convert an NDJSON trace file to a TLA+ module defining `TraceLog`.
-fn ndjson_to_tla_module(trace_file: &Path) -> Result<(String, usize), Error> {
+#[doc(hidden)]
+pub fn ndjson_to_tla_module(trace_file: &Path) -> Result<(String, usize), Error> {
     let content = std::fs::read_to_string(trace_file).map_err(ValidationError::Io)?;
 
     let mut json_objects = Vec::new();
@@ -395,6 +460,24 @@ fn json_to_tla_value(value: &serde_json::Value, line: usize, field: &str) -> Res
         }
         serde_json::Value::Object(_) => {
             json_obj_to_tla_record(value, line)
+        }
+    }
+}
+
+impl From<PathBuf> for TraceValidatorConfig {
+    fn from(trace_spec: PathBuf) -> Self {
+        Self {
+            trace_spec,
+            ..Default::default()
+        }
+    }
+}
+
+impl From<&str> for TraceValidatorConfig {
+    fn from(trace_spec: &str) -> Self {
+        Self {
+            trace_spec: PathBuf::from(trace_spec),
+            ..Default::default()
         }
     }
 }

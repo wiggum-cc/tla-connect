@@ -7,7 +7,7 @@
 pub mod client;
 pub mod types;
 
-pub use client::ApalacheRpcClient;
+pub use client::{ApalacheRpcClient, RetryConfig};
 pub use types::{SpecParameters, TransitionStatus};
 
 use crate::driver::{Driver, State, Step};
@@ -15,10 +15,32 @@ use crate::error::{Error, RpcError};
 use rand::prelude::*;
 use rand::SeedableRng;
 use std::path::Path;
+use std::time::Instant;
 use tracing::{debug, info};
+
+/// Statistics from interactive testing.
+#[derive(Debug, Clone, Default)]
+pub struct InteractiveStats {
+    pub runs_completed: usize,
+    pub total_steps: usize,
+    pub deadlocks_hit: usize,
+    pub duration: std::time::Duration,
+}
+
+/// Progress callback for interactive testing.
+pub type InteractiveProgressFn = Box<dyn Fn(InteractiveProgress) + Send + Sync>;
+
+#[derive(Debug, Clone)]
+pub struct InteractiveProgress {
+    pub run_index: usize,
+    pub total_runs: usize,
+    pub step_index: usize,
+    pub action: String,
+}
 
 /// Configuration for interactive symbolic testing.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct InteractiveConfig {
     /// Path to the TLA+ spec file (main module).
     pub spec: std::path::PathBuf,
@@ -58,6 +80,80 @@ impl Default for InteractiveConfig {
             num_runs: 50,
             constants: serde_json::Value::Object(serde_json::Map::new()),
             seed: None,
+        }
+    }
+}
+
+impl InteractiveConfig {
+    pub fn builder() -> InteractiveConfigBuilder {
+        InteractiveConfigBuilder::default()
+    }
+}
+
+#[derive(Default)]
+pub struct InteractiveConfigBuilder {
+    spec: Option<std::path::PathBuf>,
+    aux_files: Option<Vec<std::path::PathBuf>>,
+    init: Option<String>,
+    next: Option<String>,
+    max_steps: Option<usize>,
+    num_runs: Option<usize>,
+    constants: Option<serde_json::Value>,
+    seed: Option<u64>,
+}
+
+impl InteractiveConfigBuilder {
+    pub fn spec(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.spec = Some(path.into());
+        self
+    }
+
+    pub fn aux_files(mut self, files: Vec<std::path::PathBuf>) -> Self {
+        self.aux_files = Some(files);
+        self
+    }
+
+    pub fn init(mut self, init: impl Into<String>) -> Self {
+        self.init = Some(init.into());
+        self
+    }
+
+    pub fn next(mut self, next: impl Into<String>) -> Self {
+        self.next = Some(next.into());
+        self
+    }
+
+    pub fn max_steps(mut self, n: usize) -> Self {
+        self.max_steps = Some(n);
+        self
+    }
+
+    pub fn num_runs(mut self, n: usize) -> Self {
+        self.num_runs = Some(n);
+        self
+    }
+
+    pub fn constants(mut self, constants: serde_json::Value) -> Self {
+        self.constants = Some(constants);
+        self
+    }
+
+    pub fn seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
+    pub fn build(self) -> InteractiveConfig {
+        let defaults = InteractiveConfig::default();
+        InteractiveConfig {
+            spec: self.spec.unwrap_or(defaults.spec),
+            aux_files: self.aux_files.unwrap_or(defaults.aux_files),
+            init: self.init.unwrap_or(defaults.init),
+            next: self.next.unwrap_or(defaults.next),
+            max_steps: self.max_steps.unwrap_or(defaults.max_steps),
+            num_runs: self.num_runs.unwrap_or(defaults.num_runs),
+            constants: self.constants.unwrap_or(defaults.constants),
+            seed: self.seed.or(defaults.seed),
         }
     }
 }
@@ -153,11 +249,24 @@ fn extract_nondet(state: &itf::Value) -> itf::Value {
 ///    c. Execute the corresponding action on the driver
 ///    d. Compare spec state with driver state
 /// 4. Dispose the session (always, even on error)
+#[must_use = "returns a Result that should be checked for test failures"]
 pub async fn interactive_test<D: Driver>(
     driver_factory: impl Fn() -> D,
     client: &ApalacheRpcClient,
     config: &InteractiveConfig,
 ) -> Result<(), Error> {
+    interactive_test_with_progress(driver_factory, client, config, None).await?;
+    Ok(())
+}
+
+/// Interactive test with progress callback, returns stats.
+pub async fn interactive_test_with_progress<D: Driver>(
+    driver_factory: impl Fn() -> D,
+    client: &ApalacheRpcClient,
+    config: &InteractiveConfig,
+    progress: Option<InteractiveProgressFn>,
+) -> Result<InteractiveStats, Error> {
+    let start = Instant::now();
     let sources = collect_spec_sources(&config.spec, &config.aux_files)?;
 
     info!(
@@ -171,6 +280,8 @@ pub async fn interactive_test<D: Driver>(
         Some(seed) => Box::new(rand::rngs::StdRng::seed_from_u64(seed)),
         None => Box::new(rand::rng()),
     };
+
+    let mut stats = InteractiveStats::default();
 
     for run in 0..config.num_runs {
         let mut driver = driver_factory();
@@ -189,6 +300,9 @@ pub async fn interactive_test<D: Driver>(
             config,
             &mut *rng,
             run,
+            config.num_runs,
+            &progress,
+            &mut stats,
         )
         .await;
 
@@ -197,14 +311,16 @@ pub async fn interactive_test<D: Driver>(
         }
 
         result?;
+        stats.runs_completed += 1;
         debug!(run, "Run completed successfully");
     }
 
+    stats.duration = start.elapsed();
     info!(
         num_runs = config.num_runs,
         "Interactive symbolic testing completed"
     );
-    Ok(())
+    Ok(stats)
 }
 
 async fn run_single_test<D: Driver>(
@@ -215,6 +331,9 @@ async fn run_single_test<D: Driver>(
     config: &InteractiveConfig,
     rng: &mut dyn RngCore,
     run: usize,
+    total_runs: usize,
+    progress: &Option<InteractiveProgressFn>,
+    stats: &mut InteractiveStats,
 ) -> Result<(), Error> {
     let next_transitions = &load_result.spec_parameters.next_transitions;
 
@@ -256,6 +375,15 @@ async fn run_single_test<D: Driver>(
     let init_state_json = extract_last_state(&trace)?;
     let init_itf = json_state_to_itf(&init_state_json)?;
 
+    if let Some(ref cb) = progress {
+        cb(InteractiveProgress {
+            run_index: run,
+            total_runs,
+            step_index: 0,
+            action: "init".to_string(),
+        });
+    }
+
     let init_step = Step {
         action_taken: "init".to_string(),
         nondet_picks: itf::Value::Tuple(vec![].into()),
@@ -269,6 +397,7 @@ async fn run_single_test<D: Driver>(
     })?;
 
     compare_states::<D>(driver, &init_itf, run, 0, "init")?;
+    stats.total_steps += 1;
 
     for step_idx in 1..config.max_steps {
         let mut indices: Vec<u32> = next_transitions.iter().map(|t| t.index).collect();
@@ -288,6 +417,7 @@ async fn run_single_test<D: Driver>(
 
         let Some(_chosen_idx) = chosen else {
             debug!(run, step = step_idx, "No enabled transitions (deadlock)");
+            stats.deadlocks_hit += 1;
             break;
         };
 
@@ -299,6 +429,15 @@ async fn run_single_test<D: Driver>(
         let state_json = extract_last_state(&trace)?;
         let state_itf = json_state_to_itf(&state_json)?;
         let action_taken = extract_action(&state_json);
+
+        if let Some(ref cb) = progress {
+            cb(InteractiveProgress {
+                run_index: run,
+                total_runs,
+                step_index: step_idx,
+                action: action_taken.clone(),
+            });
+        }
 
         let step = Step {
             action_taken: action_taken.clone(),
@@ -314,9 +453,28 @@ async fn run_single_test<D: Driver>(
         })?;
 
         compare_states::<D>(driver, &state_itf, run, step_idx, &action_taken)?;
+        stats.total_steps += 1;
     }
 
     Ok(())
+}
+
+impl From<std::path::PathBuf> for InteractiveConfig {
+    fn from(spec: std::path::PathBuf) -> Self {
+        Self {
+            spec,
+            ..Default::default()
+        }
+    }
+}
+
+impl From<&str> for InteractiveConfig {
+    fn from(spec: &str) -> Self {
+        Self {
+            spec: std::path::PathBuf::from(spec),
+            ..Default::default()
+        }
+    }
 }
 
 fn compare_states<D: Driver>(

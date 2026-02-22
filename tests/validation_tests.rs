@@ -86,10 +86,9 @@ fn test_validation_rejects_empty_trace() {
 
     std::fs::write(&trace_path, "").unwrap();
 
-    let config = TraceValidatorConfig {
-        trace_spec: dir.path().join("nonexistent.tla"),
-        ..Default::default()
-    };
+    let config = TraceValidatorConfig::builder()
+        .trace_spec(dir.path().join("nonexistent.tla"))
+        .build();
 
     let result = validate_trace(&config, &trace_path);
     assert!(result.is_err());
@@ -108,10 +107,9 @@ fn test_validation_rejects_inconsistent_schema() {
     let spec_path = dir.path().join("Spec.tla");
     std::fs::write(&spec_path, "---- MODULE Spec ----\n====").unwrap();
 
-    let config = TraceValidatorConfig {
-        trace_spec: spec_path,
-        ..Default::default()
-    };
+    let config = TraceValidatorConfig::builder()
+        .trace_spec(spec_path)
+        .build();
 
     let result = validate_trace(&config, &trace_path);
     assert!(result.is_err());
@@ -134,10 +132,9 @@ fn test_validation_rejects_float_values() {
     let spec_path = dir.path().join("Spec.tla");
     std::fs::write(&spec_path, "---- MODULE Spec ----\n====").unwrap();
 
-    let config = TraceValidatorConfig {
-        trace_spec: spec_path,
-        ..Default::default()
-    };
+    let config = TraceValidatorConfig::builder()
+        .trace_spec(spec_path)
+        .build();
 
     let result = validate_trace(&config, &trace_path);
     assert!(result.is_err());
@@ -169,10 +166,9 @@ fn test_validation_handles_nested_objects() {
     let spec_path = dir.path().join("Spec.tla");
     std::fs::write(&spec_path, "---- MODULE Spec ----\n====").unwrap();
 
-    let config = TraceValidatorConfig {
-        trace_spec: spec_path,
-        ..Default::default()
-    };
+    let config = TraceValidatorConfig::builder()
+        .trace_spec(spec_path)
+        .build();
 
     // This should fail because apalache isn't available, but it should
     // successfully parse the nested structure first

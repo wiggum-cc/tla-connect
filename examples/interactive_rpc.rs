@@ -57,15 +57,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Connecting to Apalache server at http://localhost:8822...");
     let client = ApalacheRpcClient::new("http://localhost:8822").await?;
 
-    let config = InteractiveConfig {
-        spec: "specs/Counter.tla".into(),
-        init: "Init".into(),
-        next: "Next".into(),
-        num_runs: 50,
-        max_steps: 100,
-        seed: Some(42),
-        ..Default::default()
-    };
+    let config = InteractiveConfig::builder()
+        .spec("specs/Counter.tla")
+        .init("Init")
+        .next("Next")
+        .num_runs(50)
+        .max_steps(100)
+        .seed(42)
+        .build();
 
     println!("Running {} interactive test runs...", config.num_runs);
     interactive_test(CounterDriver::default, &client, &config).await?;

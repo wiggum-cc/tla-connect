@@ -21,6 +21,7 @@ pub struct StateEmitter {
 
 impl StateEmitter {
     /// Create a new emitter writing to the given file path.
+    #[must_use = "emitter should be used to emit states and then finished"]
     pub fn new(path: &Path) -> Result<Self, Error> {
         let file = std::fs::File::create(path).map_err(ValidationError::Io)?;
         Ok(Self {
@@ -33,6 +34,7 @@ impl StateEmitter {
     ///
     /// The `state` value must serialize to a flat JSON object. An `"action"`
     /// field is prepended to identify the transition.
+    #[must_use = "emit result should be checked for errors"]
     pub fn emit<S: Serialize>(&mut self, action: &str, state: &S) -> Result<(), Error> {
         let mut obj = serde_json::to_value(state)?;
 
@@ -55,6 +57,7 @@ impl StateEmitter {
     }
 
     /// Flush buffered output and return the number of states emitted.
+    #[must_use = "finish result should be checked for errors"]
     pub fn finish(mut self) -> Result<usize, Error> {
         self.writer.flush().map_err(ValidationError::Io)?;
         Ok(self.count)
