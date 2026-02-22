@@ -184,6 +184,7 @@ pub fn replay_traces_with_progress<D: Driver>(
 /// Replay a single ITF trace against a Driver.
 ///
 /// Internal helper used by both sequential and parallel replay.
+#[cfg_attr(not(feature = "parallel"), allow(dead_code))]
 fn replay_single_trace<D: Driver>(
     driver: &mut D,
     trace: &itf::Trace<itf::Value>,
