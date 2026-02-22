@@ -1,0 +1,47 @@
+[package]
+name = "tla-connect"
+version = "0.1.0"
+description = "TLA+/Apalache integration for model-based testing"
+authors = ["nxbrain"]
+edition = "2021"
+rust-version = "1.93"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/wiggum-cc/tla-connect"
+homepage = "https://github.com/wiggum-cc/tla-connect"
+documentation = "https://docs.rs/tla-connect"
+readme = "README.md"
+keywords = ["tla", "apalache", "model-checking", "testing", "verification"]
+categories = ["development-tools::testing", "science"]
+
+[dependencies]
+# ITF trace format deserialization
+itf = "0.4"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Diff output for state mismatches
+similar = "2"
+
+# HTTP client for Apalache JSON-RPC
+reqwest = { version = "0.13", features = ["json"] }
+
+# Async runtime (for JSON-RPC client)
+tokio = { version = "1", features = ["process", "fs", "rt"] }
+
+# Logging
+tracing = "0.1"
+
+# Temp directory for Apalache output
+tempfile = "3"
+
+# Random selection for interactive testing
+rand = "0.8"
+
+# Base64 encoding for Apalache server spec loading
+base64 = "0.22"
