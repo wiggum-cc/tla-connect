@@ -17,7 +17,7 @@ pub use types::{SpecParameters, TransitionStatus};
 
 use crate::driver::{Driver, State, Step};
 use anyhow::{bail, Context, Result};
-use rand::seq::SliceRandom;
+use rand::prelude::*;
 use std::path::Path;
 use tracing::{debug, info};
 
@@ -175,7 +175,7 @@ pub async fn interactive_test<D: Driver>(
         "Starting interactive symbolic testing"
     );
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     for run in 0..config.num_runs {
         let mut driver = driver_factory();

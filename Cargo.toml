@@ -1,6 +1,6 @@
 [package]
 name = "tla-connect"
-version = "0.1.0"
+version = "0.0.1"
 description = "TLA+/Apalache integration for model-based testing"
 authors = ["nxbrain"]
 edition = "2021"
@@ -41,7 +41,7 @@ tracing = "0.1"
 tempfile = "3"
 
 # Random selection for interactive testing
-rand = "0.8"
+rand = "0.10"
 
 # Base64 encoding for Apalache server spec loading
 base64 = "0.22"
