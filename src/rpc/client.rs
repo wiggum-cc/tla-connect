@@ -2,12 +2,9 @@
 //!
 //! Communicates with a running Apalache server to perform interactive
 //! symbolic execution of TLA+ specs.
-//!
-//! Apalache serves JSON-RPC at `http://host:port/rpc` (not `/jsonrpc`).
-//! Spec sources must be base64-encoded.
 
 use super::types::*;
-use anyhow::{bail, Context, Result};
+use crate::error::{Error, RpcError};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::debug;
 
@@ -26,11 +23,11 @@ pub struct ApalacheRpcClient {
 impl ApalacheRpcClient {
     /// Create a new client. `url` should be e.g. `http://localhost:8822`.
     /// The `/rpc` path is appended automatically.
-    pub async fn new(url: &str) -> Result<Self> {
+    pub async fn new(url: &str) -> Result<Self, Error> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .context("Failed to create HTTP client")?;
+            .map_err(|e| RpcError::ClientCreation(e.to_string()))?;
 
         let rpc_url = format!("{}/rpc", url.trim_end_matches('/'));
 
@@ -50,7 +47,7 @@ impl ApalacheRpcClient {
         init: &str,
         next: &str,
         invariants: &[&str],
-    ) -> Result<LoadSpecResult> {
+    ) -> Result<LoadSpecResult, Error> {
         let params = LoadSpecParams {
             sources,
             init: init.to_string(),
@@ -69,15 +66,12 @@ impl ApalacheRpcClient {
     }
 
     /// Check whether a transition is enabled from the current symbolic state.
-    ///
-    /// This adds a constraint to Z3. If disabled, you should `rollback()`
-    /// before trying another transition.
     pub async fn assume_transition(
         &self,
         session_id: &str,
         transition_id: u32,
         check_enabled: bool,
-    ) -> Result<AssumeTransitionResult> {
+    ) -> Result<AssumeTransitionResult, Error> {
         let params = AssumeTransitionParams {
             session_id: session_id.to_string(),
             transition_id,
@@ -87,7 +81,7 @@ impl ApalacheRpcClient {
     }
 
     /// Advance to the next state after a transition has been assumed.
-    pub async fn next_step(&self, session_id: &str) -> Result<NextStepResult> {
+    pub async fn next_step(&self, session_id: &str) -> Result<NextStepResult, Error> {
         let params = NextStepParams {
             session_id: session_id.to_string(),
         };
@@ -95,7 +89,7 @@ impl ApalacheRpcClient {
     }
 
     /// Roll back to a previously saved snapshot.
-    pub async fn rollback(&self, session_id: &str, snapshot_id: u64) -> Result<RollbackResult> {
+    pub async fn rollback(&self, session_id: &str, snapshot_id: u64) -> Result<RollbackResult, Error> {
         let params = RollbackParams {
             session_id: session_id.to_string(),
             snapshot_id,
@@ -104,15 +98,12 @@ impl ApalacheRpcClient {
     }
 
     /// Constrain state variables/constants with equality constraints.
-    ///
-    /// Useful for setting CONSTANTS before init when the explorer API
-    /// doesn't support `--cinit`.
     pub async fn assume_state(
         &self,
         session_id: &str,
         equalities: serde_json::Value,
         check_enabled: bool,
-    ) -> Result<AssumeStateResult> {
+    ) -> Result<AssumeStateResult, Error> {
         let params = AssumeStateParams {
             session_id: session_id.to_string(),
             equalities,
@@ -122,7 +113,7 @@ impl ApalacheRpcClient {
     }
 
     /// Query the current trace from the symbolic execution.
-    pub async fn query_trace(&self, session_id: &str) -> Result<QueryResult> {
+    pub async fn query_trace(&self, session_id: &str) -> Result<QueryResult, Error> {
         let params = QueryParams {
             session_id: session_id.to_string(),
             kinds: vec!["TRACE".to_string()],
@@ -131,7 +122,7 @@ impl ApalacheRpcClient {
     }
 
     /// Dispose of the loaded specification and free server resources.
-    pub async fn dispose_spec(&self, session_id: &str) -> Result<DisposeSpecResult> {
+    pub async fn dispose_spec(&self, session_id: &str) -> Result<DisposeSpecResult, Error> {
         let params = DisposeSpecParams {
             session_id: session_id.to_string(),
         };
@@ -143,7 +134,7 @@ impl ApalacheRpcClient {
         &self,
         method: &str,
         params: P,
-    ) -> Result<R> {
+    ) -> Result<R, Error> {
         let id = self.request_id.fetch_add(1, Ordering::Relaxed);
         let request = JsonRpcRequest::new(id, method, params);
 
@@ -155,27 +146,27 @@ impl ApalacheRpcClient {
             .json(&request)
             .send()
             .await
-            .with_context(|| {
-                format!(
-                    "Failed to send JSON-RPC request to {}. \
-                     Is the Apalache server running?",
-                    self.url
-                )
+            .map_err(|e| RpcError::RequestFailed {
+                url: self.url.clone(),
+                reason: e.to_string(),
             })?;
 
         let rpc_response: JsonRpcResponse = response
             .json()
             .await
-            .context("Failed to parse JSON-RPC response")?;
+            .map_err(|e| RpcError::ResponseParse(e.to_string()))?;
 
         if let Some(error) = rpc_response.error {
-            bail!("Apalache JSON-RPC error: {error}");
+            return Err(RpcError::JsonRpc {
+                code: error.code,
+                message: error.message,
+            }
+            .into());
         }
 
-        let result_value = rpc_response
-            .result
-            .context("JSON-RPC response missing 'result' field")?;
+        let result_value = rpc_response.result.ok_or(RpcError::MissingResult)?;
 
-        serde_json::from_value(result_value).context("Failed to deserialize JSON-RPC result")
+        serde_json::from_value(result_value)
+            .map_err(|e| RpcError::ResultDeserialize(e.to_string()).into())
     }
 }

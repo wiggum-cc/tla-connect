@@ -3,7 +3,7 @@
 //! Mirrors quint-connect's `Driver`/`State`/`Step` pattern, adapted for
 //! TLA+ ITF traces produced by Apalache.
 
-use anyhow::Result;
+use crate::error::DriverError;
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
 
@@ -36,7 +36,7 @@ pub trait Driver: Sized {
     /// Execute a single step from the TLA+ trace on the Rust implementation.
     ///
     /// Use the `switch!` macro to dispatch on `step.action_taken`.
-    fn step(&mut self, step: &Step) -> Result<()>;
+    fn step(&mut self, step: &Step) -> Result<(), DriverError>;
 }
 
 /// State comparison between TLA+ spec and Rust implementation.
@@ -46,15 +46,16 @@ pub trait Driver: Sized {
 /// where spec and implementation have valid semantic differences.
 pub trait State<D>: PartialEq + DeserializeOwned + Debug {
     /// Extract the comparable state from the Rust driver.
-    fn from_driver(driver: &D) -> Result<Self>;
+    fn from_driver(driver: &D) -> Result<Self, DriverError>;
 
     /// Deserialize the spec state from an ITF Value.
     ///
     /// The default implementation uses serde deserialization via `itf::Value`,
     /// which transparently handles ITF-specific encodings (`#bigint`, `#set`, etc.).
-    fn from_spec(value: itf::Value) -> Result<Self> {
-        Self::deserialize(value)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize spec state: {e}"))
+    ///
+    /// Takes a reference to avoid unnecessary cloning.
+    fn from_spec(value: &itf::Value) -> Result<Self, DriverError> {
+        Self::deserialize(value.clone()).map_err(|e| DriverError::StateExtraction(e.to_string()))
     }
 }
 
@@ -91,14 +92,14 @@ macro_rules! __switch_arms {
     ($step:ident; $action:literal => $body:expr) => {
         match $step.action_taken.as_str() {
             $action => { $body; Ok(()) },
-            other => ::anyhow::bail!("Unknown action: {}", other),
+            other => Err($crate::DriverError::UnknownAction(other.to_string())),
         }
     };
     // Final arm (with trailing comma)
     ($step:ident; $action:literal => $body:expr ,) => {
         match $step.action_taken.as_str() {
             $action => { $body; Ok(()) },
-            other => ::anyhow::bail!("Unknown action: {}", other),
+            other => Err($crate::DriverError::UnknownAction(other.to_string())),
         }
     };
     // Collect arms via recursion

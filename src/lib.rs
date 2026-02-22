@@ -6,17 +6,26 @@
 //! 1. **Approach 1 (Apalache -> ITF -> replay)**: Batch trace generation + replay.
 //!    Apalache generates ITF traces from TLA+ specs, which are replayed against
 //!    a Rust `Driver`. Direct equivalent of the Quint/quint-connect workflow.
+//!    Requires features: `replay`, `trace-gen`.
 //!
 //! 2. **Approach 2 (Apalache JSON-RPC)**: Interactive symbolic testing.
 //!    Step-by-step symbolic execution via Apalache's explorer server, interleaved
-//!    with Rust implementation execution.
+//!    with Rust implementation execution. Requires feature: `rpc`.
 //!
 //! 3. **Approach 3 (Rust -> NDJSON -> Apalache)**: Post-hoc trace validation.
 //!    Record Rust execution traces as NDJSON, then validate against a TLA+
-//!    TraceSpec using Apalache.
+//!    TraceSpec using Apalache. Requires feature: `trace-validation`.
 //!
 //! Approaches 1 & 2 catch "implementation doesn't handle a case the spec allows."
 //! Approach 3 catches "implementation does something the spec doesn't allow."
+//!
+//! # Feature Flags
+//!
+//! - `replay` (default): ITF trace replay against a Driver
+//! - `trace-gen` (default): Apalache CLI trace generation
+//! - `trace-validation` (default): Post-hoc NDJSON trace validation
+//! - `rpc`: Interactive symbolic testing via Apalache JSON-RPC
+//! - `full`: Enable all features
 //!
 //! # Quick Start (Approach 1)
 //!
@@ -27,14 +36,14 @@
 //! struct MyState { /* TLA+ vars to compare */ }
 //!
 //! impl State<MyDriver> for MyState {
-//!     fn from_driver(driver: &MyDriver) -> Result<Self> { /* ... */ }
+//!     fn from_driver(driver: &MyDriver) -> Result<Self, DriverError> { /* ... */ }
 //! }
 //!
 //! struct MyDriver { /* Rust type under test */ }
 //!
 //! impl Driver for MyDriver {
 //!     type State = MyState;
-//!     fn step(&mut self, step: &Step) -> Result<()> {
+//!     fn step(&mut self, step: &Step) -> Result<(), DriverError> {
 //!         switch!(step {
 //!             "init" => { /* init */ },
 //!             "action1" => { /* ... */ },
@@ -46,18 +55,42 @@
 //!     spec: "../../formal/tla/MySpec.tla".into(),
 //!     ..Default::default()
 //! })?;
-//! replay_traces(|| MyDriver::default(), &traces)?;
+//! replay_traces(|| MyDriver::default(), &traces.traces)?;
 //! ```
 
 pub mod driver;
+pub mod error;
+
+#[cfg(feature = "replay")]
 pub mod replay;
+
+#[cfg(feature = "rpc")]
 pub mod rpc;
+
+#[cfg(feature = "trace-gen")]
 pub mod trace_gen;
+
+#[cfg(feature = "trace-validation")]
 pub mod trace_validation;
 
-// Re-export core types for convenience
+// Re-export core types (always available)
 pub use driver::{Driver, State, Step};
+pub use error::{DriverError, Error, ReplayError, TlaResult, TraceGenError, ValidationError};
+
+// Re-export replay types
+#[cfg(feature = "replay")]
 pub use replay::{replay_trace_str, replay_traces};
+
+// Re-export RPC types
+#[cfg(feature = "rpc")]
+pub use error::RpcError;
+#[cfg(feature = "rpc")]
 pub use rpc::{interactive_test, ApalacheRpcClient, InteractiveConfig};
-pub use trace_gen::{generate_traces, ApalacheConfig, ApalacheMode};
+
+// Re-export trace generation types
+#[cfg(feature = "trace-gen")]
+pub use trace_gen::{generate_traces, ApalacheConfig, ApalacheMode, GeneratedTraces};
+
+// Re-export trace validation types
+#[cfg(feature = "trace-validation")]
 pub use trace_validation::{validate_trace, StateEmitter, TraceResult, TraceValidatorConfig};

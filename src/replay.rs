@@ -4,7 +4,7 @@
 //! comparing state after each step.
 
 use crate::driver::{Driver, State, Step};
-use anyhow::{bail, Context, Result};
+use crate::error::{Error, ReplayError};
 use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
 use tracing::{debug, info};
@@ -19,7 +19,7 @@ use tracing::{debug, info};
 pub fn replay_traces<D: Driver>(
     driver_factory: impl Fn() -> D,
     traces: &[itf::Trace<itf::Value>],
-) -> Result<()> {
+) -> Result<(), Error> {
     info!(trace_count = traces.len(), "Replaying ITF traces");
 
     for (trace_idx, trace) in traces.iter().enumerate() {
@@ -34,10 +34,11 @@ pub fn replay_traces<D: Driver>(
         for (state_idx, itf_state) in trace.states.iter().enumerate() {
             let state_value = &itf_state.value;
 
-            // Extract MBT auxiliary variables from the ITF Record
             let (action_taken, nondet_picks) =
-                extract_mbt_vars(state_value).with_context(|| {
-                    format!("Trace {trace_idx}, state {state_idx}: failed to extract MBT vars")
+                extract_mbt_vars(state_value).map_err(|reason| ReplayError::MbtVarExtraction {
+                    trace: trace_idx,
+                    state: state_idx,
+                    reason,
                 })?;
 
             let step = Step {
@@ -46,38 +47,45 @@ pub fn replay_traces<D: Driver>(
                 state: state_value.clone(),
             };
 
-            // Execute the step on the Rust driver
-            driver.step(&step).with_context(|| {
-                format!(
-                    "Trace {trace_idx}, state {state_idx}: failed to execute action '{action_taken}'"
-                )
-            })?;
+            driver
+                .step(&step)
+                .map_err(|e| ReplayError::StepExecution {
+                    trace: trace_idx,
+                    state: state_idx,
+                    action: action_taken.clone(),
+                    reason: e.to_string(),
+                })?;
 
-            // Compare states using ITF-aware deserialization
-            let spec_state = D::State::from_spec(state_value.clone()).with_context(|| {
-                format!(
-                    "Trace {trace_idx}, state {state_idx}: failed to deserialize spec state"
-                )
-            })?;
+            let spec_state =
+                D::State::from_spec(state_value).map_err(|e| ReplayError::SpecDeserialize {
+                    trace: trace_idx,
+                    state: state_idx,
+                    reason: e.to_string(),
+                })?;
 
-            let driver_state = D::State::from_driver(&driver).with_context(|| {
-                format!(
-                    "Trace {trace_idx}, state {state_idx}: failed to extract driver state"
-                )
-            })?;
+            let driver_state =
+                D::State::from_driver(&driver).map_err(|e| ReplayError::DriverStateExtraction {
+                    trace: trace_idx,
+                    state: state_idx,
+                    reason: e.to_string(),
+                })?;
 
             if spec_state != driver_state {
                 let spec_str = format!("{spec_state:#?}");
                 let driver_str = format!("{driver_state:#?}");
                 let diff = unified_diff(&spec_str, &driver_str);
 
-                bail!(
-                    "State mismatch at trace {trace_idx}, state {state_idx} \
-                     (action: '{action_taken}'):\n\n\
-                     --- spec (TLA+)\n\
-                     +++ driver (Rust)\n\
-                     {diff}"
-                );
+                return Err(ReplayError::StateMismatch {
+                    trace: trace_idx,
+                    state: state_idx,
+                    action: action_taken,
+                    diff: format!(
+                        "--- spec (TLA+)\n\
+                         +++ driver (Rust)\n\
+                         {diff}"
+                    ),
+                }
+                .into());
             }
         }
 
@@ -92,16 +100,16 @@ pub fn replay_traces<D: Driver>(
 }
 
 /// Extract `action_taken` and `nondet_picks` from an ITF state record.
-fn extract_mbt_vars(state: &itf::Value) -> Result<(String, itf::Value)> {
+fn extract_mbt_vars(state: &itf::Value) -> Result<(String, itf::Value), String> {
     let itf::Value::Record(ref rec) = state else {
-        bail!("Expected ITF state to be a Record, got: {state:?}");
+        return Err(format!("Expected ITF state to be a Record, got: {state:?}"));
     };
 
     let action_taken = rec
         .get("action_taken")
         .map(|v| String::deserialize(v.clone()))
         .transpose()
-        .context("Failed to deserialize action_taken")?
+        .map_err(|e| format!("Failed to deserialize action_taken: {e}"))?
         .unwrap_or_else(|| "init".to_string());
 
     let nondet_picks = rec
@@ -136,31 +144,32 @@ fn unified_diff(left: &str, right: &str) -> String {
 /// Replay a single ITF trace from a JSON string against a Driver.
 ///
 /// Convenience function for testing with inline trace data.
-pub fn replay_trace_str<D: Driver>(
-    driver_factory: impl Fn() -> D,
-    json: &str,
-) -> Result<()> {
-    // Parse directly via serde_json to avoid itf::trace_from_str's
-    // decode() step, which loses BigInt type info through deserialize_any.
+pub fn replay_trace_str<D: Driver>(driver_factory: impl Fn() -> D, json: &str) -> Result<(), Error> {
     let trace: itf::Trace<itf::Value> =
-        serde_json::from_str(json).context("Failed to parse ITF trace JSON")?;
+        serde_json::from_str(json).map_err(|e| ReplayError::Parse(e.to_string()))?;
     replay_traces(driver_factory, &[trace])
 }
 
 /// Parse ITF traces from a directory of `.itf.json` files.
-pub fn load_traces_from_dir(
-    dir: &std::path::Path,
-) -> Result<Vec<itf::Trace<itf::Value>>> {
+pub fn load_traces_from_dir(dir: &std::path::Path) -> Result<Vec<itf::Trace<itf::Value>>, Error> {
     let mut traces = Vec::new();
 
     if !dir.is_dir() {
-        bail!("Not a directory: {}", dir.display());
+        return Err(ReplayError::DirectoryRead {
+            path: dir.to_path_buf(),
+            reason: "Not a directory".to_string(),
+        }
+        .into());
     }
 
-    for entry in std::fs::read_dir(dir)
-        .with_context(|| format!("Failed to read directory: {}", dir.display()))?
-    {
-        let entry = entry?;
+    for entry in std::fs::read_dir(dir).map_err(|e| ReplayError::DirectoryRead {
+        path: dir.to_path_buf(),
+        reason: e.to_string(),
+    })? {
+        let entry = entry.map_err(|e| ReplayError::DirectoryRead {
+            path: dir.to_path_buf(),
+            reason: e.to_string(),
+        })?;
         let path = entry.path();
         let filename = path
             .file_name()
@@ -168,13 +177,12 @@ pub fn load_traces_from_dir(
             .unwrap_or_default();
 
         if filename.ends_with(".itf.json") {
-            let content = std::fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read: {}", path.display()))?;
-            // Parse directly via serde_json to avoid itf::trace_from_str's
-            // decode() step, which loses BigInt type info through deserialize_any.
-            let trace: itf::Trace<itf::Value> =
-                serde_json::from_str(&content)
-                    .with_context(|| format!("Failed to parse: {}", path.display()))?;
+            let content = std::fs::read_to_string(&path).map_err(|e| ReplayError::Parse(format!(
+                "Failed to read {}: {e}",
+                path.display()
+            )))?;
+            let trace: itf::Trace<itf::Value> = serde_json::from_str(&content)
+                .map_err(|e| ReplayError::Parse(format!("Failed to parse {}: {e}", path.display())))?;
             traces.push(trace);
         }
     }

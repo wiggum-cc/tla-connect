@@ -13,10 +13,19 @@ TLA+/Apalache integration for model-based testing in Rust.
 ## Features
 
 - ITF (Informal Trace Format) parsing and validation
-- Apalache JSON-RPC client for running model checks
+- Apalache CLI integration for trace generation
+- Apalache JSON-RPC client for interactive symbolic testing
 - Trace generation from TLA+ specifications
 - State comparison and diff output for debugging mismatches
 - Support for both file-based and RPC-based workflows
+
+## Feature Flags
+
+- `replay` (default): ITF trace replay against a Driver
+- `trace-gen` (default): Apalache CLI trace generation
+- `trace-validation` (default): Post-hoc NDJSON trace validation
+- `rpc`: Interactive symbolic testing via Apalache JSON-RPC
+- `full`: Enable all features
 
 ## Installation
 
@@ -25,30 +34,131 @@ Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
 tla-connect = "0.1"
+
+# For interactive RPC testing:
+# tla-connect = { version = "0.1", features = ["rpc"] }
 ```
 
 ## Quick Start
 
-```rust
-use tla_connect::trace_validation::Validator;
+### Approach 1: Batch Trace Replay
 
-// Define your state type
-#[derive(Debug, serde::Deserialize)]
-struct YourState {
-    // Your state fields
+Generate traces with Apalache, then replay against your implementation:
+
+```rust
+use tla_connect::*;
+use serde::Deserialize;
+
+#[derive(Debug, PartialEq, Deserialize)]
+struct MyState {
+    counter: i64,
 }
 
-// Create a validator
-let validator = Validator::new();
+impl State<MyDriver> for MyState {
+    fn from_driver(driver: &MyDriver) -> Result<Self, DriverError> {
+        Ok(MyState { counter: driver.counter })
+    }
+}
 
-// Validate traces against your implementation
-// See examples for detailed usage
+struct MyDriver {
+    counter: i64,
+}
+
+impl Driver for MyDriver {
+    type State = MyState;
+
+    fn step(&mut self, step: &Step) -> Result<(), DriverError> {
+        switch!(step {
+            "init" => { self.counter = 0; },
+            "increment" => { self.counter += 1; },
+            "decrement" => { self.counter -= 1; },
+        })
+    }
+}
+
+fn main() -> Result<(), Error> {
+    let generated = generate_traces(&ApalacheConfig {
+        spec: "specs/Counter.tla".into(),
+        inv: "TraceComplete",
+        ..Default::default()
+    })?;
+
+    replay_traces(|| MyDriver { counter: 0 }, &generated.traces)?;
+    Ok(())
+}
+```
+
+### Approach 2: Interactive Symbolic Testing (requires `rpc` feature)
+
+Step-by-step symbolic execution via Apalache's explorer server:
+
+```rust
+use tla_connect::*;
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let client = ApalacheRpcClient::new("http://localhost:8822").await?;
+
+    interactive_test(
+        || MyDriver::default(),
+        &client,
+        &InteractiveConfig {
+            spec: "specs/Counter.tla".into(),
+            num_runs: 100,
+            max_steps: 50,
+            seed: Some(42), // Reproducible runs
+            ..Default::default()
+        },
+    ).await?;
+
+    Ok(())
+}
+```
+
+### Approach 3: Post-hoc Trace Validation
+
+Record your implementation's execution, then validate against the spec:
+
+```rust
+use tla_connect::*;
+use serde::Serialize;
+use std::path::Path;
+
+#[derive(Serialize)]
+struct RecordedState {
+    counter: i64,
+}
+
+fn main() -> Result<(), Error> {
+    // Record execution trace
+    let mut emitter = StateEmitter::new(Path::new("trace.ndjson"))?;
+    emitter.emit("init", &RecordedState { counter: 0 })?;
+    emitter.emit("increment", &RecordedState { counter: 1 })?;
+    emitter.emit("increment", &RecordedState { counter: 2 })?;
+    emitter.finish()?;
+
+    // Validate against TLA+ spec
+    let result = validate_trace(
+        &TraceValidatorConfig {
+            trace_spec: "specs/CounterTrace.tla".into(),
+            ..Default::default()
+        },
+        Path::new("trace.ndjson"),
+    )?;
+
+    match result {
+        TraceResult::Valid => println!("Trace is valid!"),
+        TraceResult::Invalid { reason } => println!("Invalid: {reason}"),
+    }
+
+    Ok(())
+}
 ```
 
 ## Requirements
 
 - Rust 1.93 or later
-- Apalache (if using model checking features)
+- Apalache (if using trace generation or validation features)
 
 ## Documentation
 
