@@ -78,7 +78,7 @@ pub mod trace_validation;
 pub use driver::{Driver, State, Step};
 #[cfg(feature = "replay")]
 pub use driver::debug_diff;
-pub use error::{DriverError, Error, ReplayError, TlaResult, TraceGenError, ValidationError};
+pub use error::{ApalacheError, BuilderError, DirectoryReadError, DriverError, Error, ReplayError, TlaResult, TraceGenError, ValidationError};
 
 // Re-export replay types
 #[cfg(feature = "replay")]

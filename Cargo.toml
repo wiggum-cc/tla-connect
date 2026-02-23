@@ -1,6 +1,6 @@
 [package]
 name = "tla-connect"
-version = "0.0.2"
+version = "0.0.3"
 description = "TLA+/Apalache integration for model-based testing"
 authors = ["nxbrain"]
 edition = "2021"

@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .num_runs(50)
         .max_steps(100)
         .seed(42)
-        .build();
+        .build()?;
 
     println!("Running {} interactive test runs...", config.num_runs);
     interactive_test(CounterDriver::default, &client, &config).await?;

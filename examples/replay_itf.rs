@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_traces(10)
         .max_length(20)
         .mode(ApalacheMode::Simulate)
-        .build();
+        .build()?;
 
     println!("Generating traces from TLA+ spec...");
     let generated = generate_traces(&config)?;

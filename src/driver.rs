@@ -63,6 +63,13 @@ pub struct Step {
 ///
 /// Implementors hold the Rust type under test and map TLA+ actions
 /// to Rust method calls via `step()`.
+///
+/// # Parallel replay
+///
+/// When using [`replay_traces_parallel`](crate::replay_traces_parallel)
+/// (requires the `parallel` feature), your `Driver` must also implement
+/// `Send`. Each trace is replayed in its own thread, so the driver
+/// factory closure must be `Sync` and the resulting driver must be `Send`.
 pub trait Driver: Sized {
     /// The state type used for comparing TLA+ spec state with Rust state.
     type State: State<Self>;
@@ -87,7 +94,11 @@ pub trait State<D>: PartialEq + DeserializeOwned + Debug {
     /// The default implementation uses serde deserialization via `itf::Value`,
     /// which transparently handles ITF-specific encodings (`#bigint`, `#set`, etc.).
     ///
-    /// Takes a reference to avoid unnecessary cloning.
+    /// Note: The default implementation clones the `itf::Value` because serde's
+    /// `DeserializeOwned` trait requires ownership. This clone happens once per
+    /// state per trace and may be significant for large state records. Override
+    /// this method if you need to avoid the clone (e.g., by deserializing
+    /// specific fields manually).
     fn from_spec(value: &itf::Value) -> Result<Self, DriverError> {
         Self::deserialize(value.clone()).map_err(|e| DriverError::StateExtraction(e.to_string()))
     }
@@ -140,6 +151,9 @@ pub fn debug_diff<T: Debug, U: Debug>(left: &T, right: &U) -> String {
 
 /// Dispatch a TLA+ action to the corresponding Rust code.
 ///
+/// Generates a single flat `match` on `step.action_taken`, mapping each
+/// TLA+ action name to the corresponding Rust code block.
+///
 /// # Usage
 ///
 /// The first argument must be a variable name (identifier) bound to a `&Step`.
@@ -153,39 +167,14 @@ pub fn debug_diff<T: Debug, U: Debug>(left: &T, right: &U) -> String {
 /// ```
 #[macro_export]
 macro_rules! switch {
-    // Entry: accept identifier + braced body, delegate to internal TT muncher
-    ($step:ident { $($tt:tt)+ }) => {{
+    ($step:ident { $( $action:literal => $body:expr ),+ $(,)? }) => {{
         #[allow(unreachable_code)]
         {
             let __tla_step: &$crate::Step = $step;
-            $crate::__switch_arms!(__tla_step; $($tt)+)
+            match __tla_step.action_taken.as_str() {
+                $( $action => { $body; Ok(()) }, )+
+                other => Err($crate::DriverError::UnknownAction(other.to_string())),
+            }
         }
     }};
-}
-
-/// Internal TT muncher for switch arms. Not part of public API.
-#[macro_export]
-#[doc(hidden)]
-macro_rules! __switch_arms {
-    // Final arm (no trailing comma)
-    ($step:ident; $action:literal => $body:expr) => {
-        match $step.action_taken.as_str() {
-            $action => { $body; Ok(()) },
-            other => Err($crate::DriverError::UnknownAction(other.to_string())),
-        }
-    };
-    // Final arm (with trailing comma)
-    ($step:ident; $action:literal => $body:expr ,) => {
-        match $step.action_taken.as_str() {
-            $action => { $body; Ok(()) },
-            other => Err($crate::DriverError::UnknownAction(other.to_string())),
-        }
-    };
-    // Collect arms via recursion
-    ($step:ident; $action:literal => $body:expr, $($rest:tt)+) => {
-        match $step.action_taken.as_str() {
-            $action => { $body; Ok(()) },
-            _ => $crate::__switch_arms!($step; $($rest)+),
-        }
-    };
 }

@@ -14,9 +14,14 @@ use std::path::Path;
 /// ```json
 /// {"action": "request_success", "cb_state": "Closed", "failure_count": 0}
 /// ```
+///
+/// Call [`finish()`](Self::finish) when done to flush buffered output.
+/// If dropped without calling `finish()`, the destructor will attempt to
+/// flush but any errors will be silently ignored.
 pub struct StateEmitter {
-    writer: std::io::BufWriter<std::fs::File>,
+    writer: Option<std::io::BufWriter<std::fs::File>>,
     count: usize,
+    finished: bool,
 }
 
 impl StateEmitter {
@@ -25,8 +30,9 @@ impl StateEmitter {
     pub fn new(path: &Path) -> Result<Self, Error> {
         let file = std::fs::File::create(path).map_err(ValidationError::Io)?;
         Ok(Self {
-            writer: std::io::BufWriter::new(file),
+            writer: Some(std::io::BufWriter::new(file)),
             count: 0,
+            finished: false,
         })
     }
 
@@ -47,8 +53,9 @@ impl StateEmitter {
             serde_json::Value::String(action.to_string()),
         );
 
-        serde_json::to_writer(&mut self.writer, &obj)?;
-        self.writer
+        let writer = self.writer.as_mut().expect("emitter already finished");
+        serde_json::to_writer(&mut *writer, &obj)?;
+        writer
             .write_all(b"\n")
             .map_err(ValidationError::Io)?;
 
@@ -59,12 +66,34 @@ impl StateEmitter {
     /// Flush buffered output and return the number of states emitted.
     #[must_use = "finish result should be checked for errors"]
     pub fn finish(mut self) -> Result<usize, Error> {
-        self.writer.flush().map_err(ValidationError::Io)?;
+        self.flush_inner()?;
+        self.finished = true;
         Ok(self.count)
     }
 
     /// Get the number of states emitted so far.
     pub fn count(&self) -> usize {
         self.count
+    }
+
+    fn flush_inner(&mut self) -> Result<(), Error> {
+        if let Some(ref mut writer) = self.writer {
+            writer.flush().map_err(ValidationError::Io)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for StateEmitter {
+    fn drop(&mut self) {
+        if !self.finished {
+            if self.count > 0 {
+                tracing::warn!(
+                    count = self.count,
+                    "StateEmitter dropped without calling finish() — flushing buffered output"
+                );
+            }
+            let _ = self.flush_inner();
+        }
     }
 }

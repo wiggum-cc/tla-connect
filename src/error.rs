@@ -6,6 +6,31 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// Shared error for Apalache CLI execution failures.
+///
+/// Used by both `TraceGenError` and `ValidationError` to avoid duplication.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum ApalacheError {
+    /// Apalache execution failed with a non-zero exit code.
+    #[error("Apalache failed (exit code: {exit_code:?}): {message}")]
+    Execution { exit_code: Option<i32>, message: String },
+
+    /// Apalache binary not found or not executable.
+    #[error("Failed to execute Apalache. Is it installed and on PATH? {0}")]
+    NotFound(String),
+}
+
+/// Shared error for directory read failures.
+///
+/// Used by both `ReplayError` and `TraceGenError` to avoid duplication.
+#[derive(Debug, Error)]
+#[error("Failed to read directory {path}: {reason}")]
+pub struct DirectoryReadError {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
 /// Top-level error type for tla-connect operations.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -30,6 +55,10 @@ pub enum Error {
     /// Error in driver step execution.
     #[error("Driver error: {0}")]
     Driver(#[from] DriverError),
+
+    /// Error during configuration building.
+    #[error("Builder error: {0}")]
+    Builder(#[from] BuilderError),
 
     /// IO error.
     #[error("IO error: {0}")]
@@ -95,8 +124,8 @@ pub enum ReplayError {
     Parse(String),
 
     /// Directory read error.
-    #[error("Failed to read directory {path}: {reason}")]
-    DirectoryRead { path: PathBuf, reason: String },
+    #[error(transparent)]
+    DirectoryRead(#[from] DirectoryReadError),
 }
 
 /// Error during Apalache trace generation.
@@ -111,13 +140,9 @@ pub enum TraceGenError {
     #[error("Failed to create temp directory: {0}")]
     TempDir(String),
 
-    /// Apalache execution failed.
-    #[error("Apalache failed (exit code: {exit_code}): {message}")]
-    ApalacheExecution { exit_code: i32, message: String },
-
-    /// Apalache binary not found or not executable.
-    #[error("Failed to execute Apalache. Is it installed and on PATH? {0}")]
-    ApalacheNotFound(String),
+    /// Apalache CLI error.
+    #[error(transparent)]
+    Apalache(#[from] ApalacheError),
 
     /// No ITF traces found in output.
     #[error("No ITF traces found in Apalache output directory: {0}")]
@@ -127,9 +152,9 @@ pub enum TraceGenError {
     #[error("Failed to parse ITF trace {path}: {reason}")]
     TraceParse { path: PathBuf, reason: String },
 
-    /// Failed to read directory.
-    #[error("Failed to read directory {path}: {reason}")]
-    DirectoryRead { path: PathBuf, reason: String },
+    /// Directory read error.
+    #[error(transparent)]
+    DirectoryRead(#[from] DirectoryReadError),
 }
 
 /// Error during trace validation (Approach 3).
@@ -184,16 +209,9 @@ pub enum ValidationError {
     #[error("Failed to convert line {line} to TLA+ record: {reason}")]
     TlaConversion { line: usize, reason: String },
 
-    /// Apalache execution failed.
-    #[error("Apalache failed (exit code: {exit_code:?}): {message}")]
-    ApalacheExecution {
-        exit_code: Option<i32>,
-        message: String,
-    },
-
-    /// Apalache binary not found.
-    #[error("Failed to execute Apalache. Is it installed and on PATH? {0}")]
-    ApalacheNotFound(String),
+    /// Apalache CLI error.
+    #[error(transparent)]
+    Apalache(#[from] ApalacheError),
 
     /// Failed to create work directory.
     #[error("Failed to create work directory: {0}")]
@@ -254,13 +272,12 @@ pub enum RpcError {
     ConstantsUnsatisfiable { run: usize },
 
     /// State mismatch.
-    #[error("State mismatch at run {run}, step {step} (action: '{action}'):\nspec:   {spec_state}\ndriver: {driver_state}")]
+    #[error("State mismatch at run {run}, step {step} (action: '{action}'):\n{diff}")]
     StateMismatch {
         run: usize,
         step: usize,
         action: String,
-        spec_state: String,
-        driver_state: String,
+        diff: String,
     },
 
     /// Failed to execute action.
@@ -299,6 +316,15 @@ pub enum RpcError {
     /// Failed to convert state.
     #[error("Failed to convert state to ITF Value: {0}")]
     StateConversion(String),
+}
+
+/// Error during configuration building.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum BuilderError {
+    /// A required field was not set.
+    #[error("Required field '{field}' was not set on {builder}")]
+    MissingRequiredField { builder: &'static str, field: &'static str },
 }
 
 /// Error during driver step execution.

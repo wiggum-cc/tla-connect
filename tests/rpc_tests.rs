@@ -77,7 +77,7 @@ async fn test_load_spec_success() {
 
     let client = ApalacheRpcClient::new(&mock_server.uri()).await.unwrap();
     let result = client
-        .load_spec(vec!["base64content".to_string()], "Init", "Next", &[])
+        .load_spec(&["base64content".to_string()], "Init", "Next", &[])
         .await;
 
     assert!(result.is_ok());
@@ -107,7 +107,7 @@ async fn test_json_rpc_error_handling() {
 
     let client = ApalacheRpcClient::new(&mock_server.uri()).await.unwrap();
     let result = client
-        .load_spec(vec![], "Init", "Next", &[])
+        .load_spec(&[], "Init", "Next", &[])
         .await;
 
     assert!(result.is_err());
@@ -151,7 +151,7 @@ async fn test_retry_on_network_error() {
         .unwrap();
 
     let result = client
-        .load_spec(vec![], "Init", "Next", &[])
+        .load_spec(&[], "Init", "Next", &[])
         .await;
 
     // Should succeed since server responds

@@ -4,7 +4,7 @@
 //! specification by running Apalache on a TraceSpec.
 
 use crate::error::{Error, ValidationError};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
@@ -109,16 +109,20 @@ impl TraceValidatorConfigBuilder {
         self
     }
 
-    pub fn build(self) -> TraceValidatorConfig {
+    pub fn build(self) -> Result<TraceValidatorConfig, crate::error::BuilderError> {
         let defaults = TraceValidatorConfig::default();
-        TraceValidatorConfig {
-            trace_spec: self.trace_spec.unwrap_or(defaults.trace_spec),
+        let trace_spec = self.trace_spec.ok_or(crate::error::BuilderError::MissingRequiredField {
+            builder: "TraceValidatorConfigBuilder",
+            field: "trace_spec",
+        })?;
+        Ok(TraceValidatorConfig {
+            trace_spec,
             init: self.init.unwrap_or(defaults.init),
             next: self.next.unwrap_or(defaults.next),
             inv: self.inv.unwrap_or(defaults.inv),
             cinit: self.cinit.unwrap_or(defaults.cinit),
             apalache_bin: self.apalache_bin.unwrap_or(defaults.apalache_bin),
-        }
+        })
     }
 }
 
@@ -200,7 +204,7 @@ pub fn validate_trace(config: &TraceValidatorConfig, trace_file: &Path) -> Resul
 
     let output = cmd
         .output()
-        .map_err(|e| ValidationError::ApalacheNotFound(e.to_string()))?;
+        .map_err(|e| ValidationError::from(crate::error::ApalacheError::NotFound(e.to_string())))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -237,10 +241,10 @@ fn parse_apalache_output(
                 .chain(stderr.lines().filter(|l| !l.is_empty()))
                 .collect();
 
-            Err(ValidationError::ApalacheExecution {
+            Err(ValidationError::from(crate::error::ApalacheError::Execution {
                 exit_code,
                 message: error_lines.join("\n"),
-            }
+            })
             .into())
         }
     }
@@ -347,33 +351,35 @@ fn validate_json_types(value: &serde_json::Value, line: usize) -> Result<(), Err
     })?;
 
     for (key, val) in obj {
-        match val {
-            serde_json::Value::Number(n) => {
-                if n.is_f64() && !n.is_i64() && !n.is_u64() {
-                    return Err(ValidationError::FloatNotSupported {
-                        line,
-                        field: key.clone(),
-                        value: n.as_f64().unwrap_or(0.0),
-                    }
-                    .into());
+        validate_json_value(val, line, key)?;
+    }
+    Ok(())
+}
+
+/// Recursively validate a JSON value, rejecting floats at any depth.
+fn validate_json_value(value: &serde_json::Value, line: usize, field: &str) -> Result<(), Error> {
+    match value {
+        serde_json::Value::Number(n) => {
+            if n.is_f64() && !n.is_i64() && !n.is_u64() {
+                return Err(ValidationError::FloatNotSupported {
+                    line,
+                    field: field.to_string(),
+                    value: n.as_f64().unwrap_or(0.0),
                 }
+                .into());
             }
-            serde_json::Value::Array(arr) => {
-                for (idx, elem) in arr.iter().enumerate() {
-                    if let serde_json::Value::Number(n) = elem {
-                        if n.is_f64() && !n.is_i64() && !n.is_u64() {
-                            return Err(ValidationError::FloatNotSupported {
-                                line,
-                                field: format!("{key}[{idx}]"),
-                                value: n.as_f64().unwrap_or(0.0),
-                            }
-                            .into());
-                        }
-                    }
-                }
-            }
-            _ => {}
         }
+        serde_json::Value::Array(arr) => {
+            for (idx, elem) in arr.iter().enumerate() {
+                validate_json_value(elem, line, &format!("{field}[{idx}]"))?;
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            for (key, val) in obj {
+                validate_json_value(val, line, &format!("{field}.{key}"))?;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -383,8 +389,9 @@ fn infer_snowcat_record_type(value: &serde_json::Value) -> Result<String, Error>
         found: format!("{value}"),
     })?;
 
+    let sorted: BTreeMap<_, _> = obj.iter().collect();
     let mut fields = Vec::new();
-    for (key, val) in obj {
+    for (key, val) in &sorted {
         let ty = infer_snowcat_type(val);
         fields.push(format!("{key}: {ty}"));
     }
@@ -405,7 +412,8 @@ fn infer_snowcat_type(value: &serde_json::Value) -> String {
             }
         }
         serde_json::Value::Object(obj) => {
-            let fields: Vec<String> = obj
+            let sorted: BTreeMap<_, _> = obj.iter().collect();
+            let fields: Vec<String> = sorted
                 .iter()
                 .map(|(k, v)| format!("{k}: {}", infer_snowcat_type(v)))
                 .collect();
@@ -421,9 +429,10 @@ fn json_obj_to_tla_record(value: &serde_json::Value, line: usize) -> Result<Stri
         reason: format!("Expected JSON object, got: {value}"),
     })?;
 
+    let sorted: BTreeMap<_, _> = obj.iter().collect();
     let mut fields = Vec::new();
 
-    for (key, val) in obj {
+    for (key, val) in &sorted {
         let tla_val = json_to_tla_value(val, line, key)?;
         fields.push(format!("{key} |-> {tla_val}"));
     }
@@ -499,4 +508,114 @@ fn escape_tla_string(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn escape_tla_string_plain() {
+        assert_eq!(escape_tla_string("hello"), "hello");
+    }
+
+    #[test]
+    fn escape_tla_string_special_chars() {
+        assert_eq!(escape_tla_string("a\\b"), "a\\\\b");
+        assert_eq!(escape_tla_string("a\"b"), "a\\\"b");
+        assert_eq!(escape_tla_string("a\nb"), "a\\nb");
+        assert_eq!(escape_tla_string("a\rb"), "a\\rb");
+        assert_eq!(escape_tla_string("a\tb"), "a\\tb");
+    }
+
+    #[test]
+    fn escape_tla_string_control_char() {
+        let result = escape_tla_string("a\x01b");
+        assert_eq!(result, "a\\u0001b");
+    }
+
+    #[test]
+    fn json_to_tla_value_null() {
+        let val = json!(null);
+        assert_eq!(json_to_tla_value(&val, 1, "f").unwrap(), "\"null\"");
+    }
+
+    #[test]
+    fn json_to_tla_value_bool() {
+        assert_eq!(json_to_tla_value(&json!(true), 1, "f").unwrap(), "TRUE");
+        assert_eq!(json_to_tla_value(&json!(false), 1, "f").unwrap(), "FALSE");
+    }
+
+    #[test]
+    fn json_to_tla_value_int() {
+        assert_eq!(json_to_tla_value(&json!(42), 1, "f").unwrap(), "42");
+        assert_eq!(json_to_tla_value(&json!(-7), 1, "f").unwrap(), "-7");
+    }
+
+    #[test]
+    fn json_to_tla_value_string() {
+        assert_eq!(json_to_tla_value(&json!("hello"), 1, "f").unwrap(), "\"hello\"");
+    }
+
+    #[test]
+    fn json_to_tla_value_array() {
+        assert_eq!(json_to_tla_value(&json!([1, 2, 3]), 1, "f").unwrap(), "<<1, 2, 3>>");
+        assert_eq!(json_to_tla_value(&json!([]), 1, "f").unwrap(), "<<>>");
+    }
+
+    #[test]
+    fn json_to_tla_value_float_rejected() {
+        assert!(json_to_tla_value(&json!(3.14), 1, "f").is_err());
+    }
+
+    #[test]
+    fn validate_json_types_nested_float() {
+        // Float nested in array of arrays should be rejected
+        let val = json!({"data": [[3.14]]});
+        assert!(validate_json_types(&val, 1).is_err());
+    }
+
+    #[test]
+    fn validate_json_types_nested_object_float() {
+        // Float nested in object should be rejected
+        let val = json!({"outer": {"inner": 3.14}});
+        assert!(validate_json_types(&val, 1).is_err());
+    }
+
+    #[test]
+    fn validate_json_types_valid() {
+        let val = json!({"a": 1, "b": "str", "c": true, "d": [1, 2]});
+        assert!(validate_json_types(&val, 1).is_ok());
+    }
+
+    #[test]
+    fn infer_snowcat_type_primitives() {
+        assert_eq!(infer_snowcat_type(&json!(true)), "Bool");
+        assert_eq!(infer_snowcat_type(&json!(42)), "Int");
+        assert_eq!(infer_snowcat_type(&json!("hi")), "Str");
+        assert_eq!(infer_snowcat_type(&json!(null)), "Str");
+    }
+
+    #[test]
+    fn infer_snowcat_type_array() {
+        assert_eq!(infer_snowcat_type(&json!([1, 2])), "Seq(Int)");
+        assert_eq!(infer_snowcat_type(&json!([])), "Seq(Int)");
+    }
+
+    #[test]
+    fn json_obj_to_tla_record_sorted() {
+        let val = json!({"z": 1, "a": 2});
+        let record = json_obj_to_tla_record(&val, 1).unwrap();
+        // Fields should be sorted alphabetically
+        assert!(record.starts_with("[a |->"));
+    }
+
+    #[test]
+    fn builder_missing_required_field() {
+        let result = TraceValidatorConfig::builder().build();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("trace_spec"));
+    }
 }

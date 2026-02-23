@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .next("TraceNext")
         .inv("TraceFinished")
         .cinit("TraceConstInit")
-        .build();
+        .build()?;
 
     let result = validate_trace(&config, trace_path)?;
 

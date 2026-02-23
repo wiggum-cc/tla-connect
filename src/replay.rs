@@ -87,88 +87,23 @@ pub fn replay_traces_with_progress<D: Driver>(
 
     for (trace_idx, trace) in traces.iter().enumerate() {
         let trace = trace.borrow();
-        let total_states = trace.states.len();
 
         debug!(
             trace = trace_idx,
-            states = total_states,
+            states = trace.states.len(),
             "Replaying trace"
         );
 
         let mut driver = driver_factory();
+        let states = replay_single_trace(
+            &mut driver,
+            trace,
+            trace_idx,
+            total_traces,
+            &progress,
+        )?;
 
-        for (state_idx, itf_state) in trace.states.iter().enumerate() {
-            let state_value = &itf_state.value;
-
-            let (action_taken, nondet_picks) =
-                extract_mbt_vars(state_value).map_err(|reason| ReplayError::MbtVarExtraction {
-                    trace: trace_idx,
-                    state: state_idx,
-                    reason,
-                })?;
-
-            if let Some(ref cb) = progress {
-                cb(ReplayProgress {
-                    trace_index: trace_idx,
-                    total_traces,
-                    state_index: state_idx,
-                    total_states,
-                    action: action_taken.clone(),
-                });
-            }
-
-            let step = Step {
-                action_taken: action_taken.clone(),
-                nondet_picks,
-                state: state_value.clone(),
-            };
-
-            driver
-                .step(&step)
-                .map_err(|e| ReplayError::StepExecution {
-                    trace: trace_idx,
-                    state: state_idx,
-                    action: action_taken.clone(),
-                    reason: e.to_string(),
-                })?;
-
-            let spec_state =
-                D::State::from_spec(state_value).map_err(|e| ReplayError::SpecDeserialize {
-                    trace: trace_idx,
-                    state: state_idx,
-                    reason: e.to_string(),
-                })?;
-
-            let driver_state =
-                D::State::from_driver(&driver).map_err(|e| ReplayError::DriverStateExtraction {
-                    trace: trace_idx,
-                    state: state_idx,
-                    reason: e.to_string(),
-                })?;
-
-            if spec_state != driver_state {
-                let summary_diff = spec_state.diff(&driver_state);
-                let spec_str = format!("{spec_state:#?}");
-                let driver_str = format!("{driver_state:#?}");
-                let full_diff = unified_diff(&spec_str, &driver_str);
-
-                return Err(ReplayError::StateMismatch {
-                    trace: trace_idx,
-                    state: state_idx,
-                    action: action_taken,
-                    diff: format!(
-                        "State differences:\n{summary_diff}\n\
-                         --- spec (TLA+)\n\
-                         +++ driver (Rust)\n\
-                         {full_diff}"
-                    ),
-                }
-                .into());
-            }
-
-            stats.total_states += 1;
-        }
-
+        stats.total_states += states;
         stats.traces_replayed += 1;
         debug!(trace = trace_idx, "Trace replay successful");
     }
@@ -184,12 +119,15 @@ pub fn replay_traces_with_progress<D: Driver>(
 /// Replay a single ITF trace against a Driver.
 ///
 /// Internal helper used by both sequential and parallel replay.
-#[cfg_attr(not(feature = "parallel"), allow(dead_code))]
 fn replay_single_trace<D: Driver>(
     driver: &mut D,
     trace: &itf::Trace<itf::Value>,
     trace_idx: usize,
+    total_traces: usize,
+    progress: &Option<ReplayProgressFn>,
 ) -> Result<usize, Error> {
+    let total_states = trace.states.len();
+
     for (state_idx, itf_state) in trace.states.iter().enumerate() {
         let state_value = &itf_state.value;
 
@@ -199,6 +137,16 @@ fn replay_single_trace<D: Driver>(
                 state: state_idx,
                 reason,
             })?;
+
+        if let Some(ref cb) = progress {
+            cb(ReplayProgress {
+                trace_index: trace_idx,
+                total_traces,
+                state_index: state_idx,
+                total_states,
+                action: action_taken.clone(),
+            });
+        }
 
         let step = Step {
             action_taken: action_taken.clone(),
@@ -311,21 +259,21 @@ pub fn load_traces_from_dir(dir: &std::path::Path) -> Result<Vec<itf::Trace<itf:
     let mut traces = Vec::new();
 
     if !dir.is_dir() {
-        return Err(ReplayError::DirectoryRead {
+        return Err(ReplayError::from(crate::error::DirectoryReadError {
             path: dir.to_path_buf(),
             reason: "Not a directory".to_string(),
-        }
+        })
         .into());
     }
 
-    for entry in std::fs::read_dir(dir).map_err(|e| ReplayError::DirectoryRead {
+    for entry in std::fs::read_dir(dir).map_err(|e| ReplayError::from(crate::error::DirectoryReadError {
         path: dir.to_path_buf(),
         reason: e.to_string(),
-    })? {
-        let entry = entry.map_err(|e| ReplayError::DirectoryRead {
+    }))? {
+        let entry = entry.map_err(|e| ReplayError::from(crate::error::DirectoryReadError {
             path: dir.to_path_buf(),
             reason: e.to_string(),
-        })?;
+        }))?;
         let path = entry.path();
         let filename = path
             .file_name()
@@ -346,6 +294,64 @@ pub fn load_traces_from_dir(dir: &std::path::Path) -> Result<Vec<itf::Trace<itf:
     Ok(traces)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_mbt_vars_from_record() {
+        let state = itf::Value::Record(
+            vec![
+                ("action_taken".to_string(), itf::Value::String("increment".into())),
+                ("nondet_picks".to_string(), itf::Value::Record(
+                    vec![("amount".to_string(), itf::Value::Number(5))].into_iter().collect(),
+                )),
+                ("counter".to_string(), itf::Value::Number(42)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let (action, nondet) = extract_mbt_vars(&state).unwrap();
+        assert_eq!(action, "increment");
+        assert!(matches!(nondet, itf::Value::Record(_)));
+    }
+
+    #[test]
+    fn extract_mbt_vars_defaults_init() {
+        // When action_taken is absent, should default to "init"
+        let state = itf::Value::Record(
+            vec![("counter".to_string(), itf::Value::Number(0))]
+                .into_iter()
+                .collect(),
+        );
+
+        let (action, nondet) = extract_mbt_vars(&state).unwrap();
+        assert_eq!(action, "init");
+        assert!(matches!(nondet, itf::Value::Tuple(_)));
+    }
+
+    #[test]
+    fn extract_mbt_vars_rejects_non_record() {
+        let state = itf::Value::Number(42);
+        assert!(extract_mbt_vars(&state).is_err());
+    }
+
+    #[test]
+    fn unified_diff_identical() {
+        let result = unified_diff("hello\nworld\n", "hello\nworld\n");
+        assert!(!result.contains('+'));
+        assert!(!result.contains('-'));
+    }
+
+    #[test]
+    fn unified_diff_different() {
+        let result = unified_diff("hello\n", "world\n");
+        assert!(result.contains("-hello"));
+        assert!(result.contains("+world"));
+    }
+}
+
 /// Replay traces in parallel using rayon.
 ///
 /// Each trace is replayed independently in its own thread.
@@ -358,13 +364,14 @@ pub fn replay_traces_parallel<D: Driver + Send>(
     use rayon::prelude::*;
 
     let start = std::time::Instant::now();
+    let total_traces = traces.len();
 
     let results: Result<Vec<(usize, usize)>, Error> = traces
         .par_iter()
         .enumerate()
         .map(|(trace_idx, trace)| {
             let mut driver = driver_factory();
-            let states = replay_single_trace(&mut driver, trace, trace_idx)?;
+            let states = replay_single_trace(&mut driver, trace, trace_idx, total_traces, &None)?;
             Ok((1, states))
         })
         .collect();

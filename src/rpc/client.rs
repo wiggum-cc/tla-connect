@@ -73,8 +73,11 @@ impl ApalacheRpcClient {
 
     /// Check if the Apalache server is reachable.
     ///
-    /// This sends a simple request to verify connectivity.
-    /// Returns Ok(()) if the server responds, or an error if unreachable.
+    /// Sends a GET request to the server's base URL to verify connectivity.
+    /// Returns `Ok(())` if the server responds with any 2xx or 4xx status
+    /// (a 4xx still indicates the server is running and reachable, just that
+    /// the endpoint may not support GET). Returns an error for 5xx responses
+    /// or connection failures.
     pub async fn ping(&self) -> Result<(), Error> {
         let response = self
             .client
@@ -105,13 +108,13 @@ impl ApalacheRpcClient {
     #[must_use = "returns a Result containing the load result with session ID"]
     pub async fn load_spec(
         &self,
-        sources: Vec<String>,
+        sources: &[String],
         init: &str,
         next: &str,
         invariants: &[&str],
     ) -> Result<LoadSpecResult, Error> {
         let params = LoadSpecParams {
-            sources,
+            sources: sources.to_vec(),
             init: init.to_string(),
             next: next.to_string(),
             invariants: invariants.iter().map(|s| s.to_string()).collect(),

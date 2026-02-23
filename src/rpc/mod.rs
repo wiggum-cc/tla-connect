@@ -143,10 +143,14 @@ impl InteractiveConfigBuilder {
         self
     }
 
-    pub fn build(self) -> InteractiveConfig {
+    pub fn build(self) -> Result<InteractiveConfig, crate::error::BuilderError> {
         let defaults = InteractiveConfig::default();
-        InteractiveConfig {
-            spec: self.spec.unwrap_or(defaults.spec),
+        let spec = self.spec.ok_or(crate::error::BuilderError::MissingRequiredField {
+            builder: "InteractiveConfigBuilder",
+            field: "spec",
+        })?;
+        Ok(InteractiveConfig {
+            spec,
             aux_files: self.aux_files.unwrap_or(defaults.aux_files),
             init: self.init.unwrap_or(defaults.init),
             next: self.next.unwrap_or(defaults.next),
@@ -154,7 +158,7 @@ impl InteractiveConfigBuilder {
             num_runs: self.num_runs.unwrap_or(defaults.num_runs),
             constants: self.constants.unwrap_or(defaults.constants),
             seed: self.seed.or(defaults.seed),
-        }
+        })
     }
 }
 
@@ -287,7 +291,7 @@ pub async fn interactive_test_with_progress<D: Driver>(
         let mut driver = driver_factory();
 
         let load_result = client
-            .load_spec(sources.clone(), &config.init, &config.next, &[])
+            .load_spec(&sources, &config.init, &config.next, &[])
             .await?;
 
         let session = load_result.session_id.clone();
@@ -323,6 +327,7 @@ pub async fn interactive_test_with_progress<D: Driver>(
     Ok(stats)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_single_test<D: Driver>(
     driver: &mut D,
     client: &ApalacheRpcClient,
@@ -341,7 +346,7 @@ async fn run_single_test<D: Driver>(
         && !config
             .constants
             .as_object()
-            .map_or(true, |m| m.is_empty())
+            .is_none_or(|m| m.is_empty())
     {
         let result = client
             .assume_state(session, config.constants.clone(), true)
@@ -497,12 +502,27 @@ fn compare_states<D: Driver>(
     })?;
 
     if spec_state != driver_state {
+        let summary_diff = spec_state.diff(&driver_state);
+        let spec_str = format!("{spec_state:#?}");
+        let driver_str = format!("{driver_state:#?}");
+
+        let full_diff = {
+            #[cfg(feature = "replay")]
+            { crate::replay::unified_diff(&spec_str, &driver_str) }
+            #[cfg(not(feature = "replay"))]
+            { format!("--- spec (TLA+)\n{spec_str}\n+++ driver (Rust)\n{driver_str}") }
+        };
+
         return Err(RpcError::StateMismatch {
             run,
             step,
             action: action.to_string(),
-            spec_state: format!("{spec_state:?}"),
-            driver_state: format!("{driver_state:?}"),
+            diff: format!(
+                "State differences:\n{summary_diff}\n\
+                 --- spec (TLA+)\n\
+                 +++ driver (Rust)\n\
+                 {full_diff}"
+            ),
         }
         .into());
     }

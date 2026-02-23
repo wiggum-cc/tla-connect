@@ -151,10 +151,14 @@ impl ApalacheConfigBuilder {
         self
     }
 
-    pub fn build(self) -> ApalacheConfig {
+    pub fn build(self) -> Result<ApalacheConfig, crate::error::BuilderError> {
         let defaults = ApalacheConfig::default();
-        ApalacheConfig {
-            spec: self.spec.unwrap_or(defaults.spec),
+        let spec = self.spec.ok_or(crate::error::BuilderError::MissingRequiredField {
+            builder: "ApalacheConfigBuilder",
+            field: "spec",
+        })?;
+        Ok(ApalacheConfig {
+            spec,
             inv: self.inv.unwrap_or(defaults.inv),
             max_traces: self.max_traces.unwrap_or(defaults.max_traces),
             max_length: self.max_length.unwrap_or(defaults.max_length),
@@ -164,7 +168,7 @@ impl ApalacheConfigBuilder {
             apalache_bin: self.apalache_bin.unwrap_or(defaults.apalache_bin),
             out_dir: self.out_dir.or(defaults.out_dir),
             keep_outputs: self.keep_outputs.unwrap_or(defaults.keep_outputs),
-        }
+        })
     }
 }
 
@@ -203,10 +207,7 @@ impl GeneratedTraces {
     /// Returns the path to the persisted directory.
     pub fn persist(mut self) -> PathBuf {
         if let Some(temp) = self._temp.take() {
-            let path = temp.path().to_path_buf();
-            // Prevent cleanup by forgetting the TempDir
-            std::mem::forget(temp);
-            path
+            temp.keep()
         } else {
             self.out_dir.clone()
         }
@@ -224,12 +225,11 @@ pub fn generate_traces(config: &ApalacheConfig) -> Result<GeneratedTraces, Error
         None => {
             let tmp = tempfile::tempdir()
                 .map_err(|e| TraceGenError::TempDir(e.to_string()))?;
-            let path = tmp.path().to_path_buf();
             if config.keep_outputs {
-                // Prevent cleanup by forgetting the TempDir
-                std::mem::forget(tmp);
+                let path = tmp.keep();
                 (path, None)
             } else {
+                let path = tmp.path().to_path_buf();
                 (path, Some(tmp))
             }
         }
@@ -278,17 +278,17 @@ pub fn generate_traces(config: &ApalacheConfig) -> Result<GeneratedTraces, Error
 
     let output = cmd
         .output()
-        .map_err(|e| TraceGenError::ApalacheNotFound(e.to_string()))?;
+        .map_err(|e| TraceGenError::from(crate::error::ApalacheError::NotFound(e.to_string())))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     let exit_code = output.status.code().unwrap_or(-1);
     if exit_code != 0 && exit_code != 12 {
-        return Err(TraceGenError::ApalacheExecution {
-            exit_code,
+        return Err(TraceGenError::from(crate::error::ApalacheError::Execution {
+            exit_code: Some(exit_code),
             message: format!("stdout: {stdout}\nstderr: {stderr}"),
-        }
+        })
         .into());
     }
 
@@ -351,20 +351,85 @@ impl From<&str> for ApalacheConfig {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn walkdir_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = walkdir(tmp.path()).unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn walkdir_with_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "").unwrap();
+        std::fs::write(tmp.path().join("b.txt"), "").unwrap();
+
+        let files = walkdir(tmp.path()).unwrap();
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn walkdir_recursive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(tmp.path().join("top.txt"), "").unwrap();
+        std::fs::write(sub.join("nested.txt"), "").unwrap();
+
+        let files = walkdir(tmp.path()).unwrap();
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn walkdir_nonexistent_returns_empty() {
+        let files = walkdir(Path::new("/nonexistent/dir")).unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn builder_missing_spec_returns_error() {
+        let result = ApalacheConfig::builder().build();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("spec"));
+    }
+
+    #[test]
+    fn builder_with_spec_succeeds() {
+        let config = ApalacheConfig::builder()
+            .spec("test.tla")
+            .build()
+            .unwrap();
+        assert_eq!(config.spec, PathBuf::from("test.tla"));
+        assert_eq!(config.inv, "TraceComplete");
+        assert_eq!(config.max_traces, 100);
+    }
+
+    #[test]
+    fn config_from_str() {
+        let config: ApalacheConfig = "test.tla".into();
+        assert_eq!(config.spec, PathBuf::from("test.tla"));
+    }
+}
+
 /// Simple recursive directory walker.
 fn walkdir(dir: &Path) -> Result<Vec<PathBuf>, Error> {
     let mut files = Vec::new();
     if !dir.is_dir() {
         return Ok(files);
     }
-    for entry in std::fs::read_dir(dir).map_err(|e| TraceGenError::DirectoryRead {
+    for entry in std::fs::read_dir(dir).map_err(|e| TraceGenError::from(crate::error::DirectoryReadError {
         path: dir.to_path_buf(),
         reason: e.to_string(),
-    })? {
-        let entry = entry.map_err(|e| TraceGenError::DirectoryRead {
+    }))? {
+        let entry = entry.map_err(|e| TraceGenError::from(crate::error::DirectoryReadError {
             path: dir.to_path_buf(),
             reason: e.to_string(),
-        })?;
+        }))?;
         let path = entry.path();
         if path.is_dir() {
             files.extend(walkdir(&path)?);

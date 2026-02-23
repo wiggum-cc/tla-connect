@@ -88,7 +88,8 @@ fn test_validation_rejects_empty_trace() {
 
     let config = TraceValidatorConfig::builder()
         .trace_spec(dir.path().join("nonexistent.tla"))
-        .build();
+        .build()
+        .unwrap();
 
     let result = validate_trace(&config, &trace_path);
     assert!(result.is_err());
@@ -109,7 +110,8 @@ fn test_validation_rejects_inconsistent_schema() {
 
     let config = TraceValidatorConfig::builder()
         .trace_spec(spec_path)
-        .build();
+        .build()
+        .unwrap();
 
     let result = validate_trace(&config, &trace_path);
     assert!(result.is_err());
@@ -134,7 +136,8 @@ fn test_validation_rejects_float_values() {
 
     let config = TraceValidatorConfig::builder()
         .trace_spec(spec_path)
-        .build();
+        .build()
+        .unwrap();
 
     let result = validate_trace(&config, &trace_path);
     assert!(result.is_err());
@@ -168,7 +171,8 @@ fn test_validation_handles_nested_objects() {
 
     let config = TraceValidatorConfig::builder()
         .trace_spec(spec_path)
-        .build();
+        .build()
+        .unwrap();
 
     // This should fail because apalache isn't available, but it should
     // successfully parse the nested structure first
