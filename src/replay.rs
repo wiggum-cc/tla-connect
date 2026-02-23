@@ -7,19 +7,20 @@
 //!
 //! ```
 //! use tla_connect::replay_trace_str;
-//! # use tla_connect::{Driver, State, Step, DriverError, switch};
+//! # use tla_connect::{Driver, State, ExtractState, Step, DriverError, switch};
 //! # use serde::Deserialize;
 //! #
 //! # #[derive(Debug, PartialEq, Deserialize)]
 //! # struct S { counter: i64 }
 //! # struct D { v: i64 }
-//! # impl State<D> for S {
+//! # impl State for S {}
+//! # impl ExtractState<D> for S {
 //! #     fn from_driver(d: &D) -> Result<Self, DriverError> { Ok(S { counter: d.v }) }
 //! # }
 //! # impl Driver for D {
 //! #     type State = S;
 //! #     fn step(&mut self, step: &Step) -> Result<(), DriverError> {
-//! #         switch!(step { "init" => { self.v = 0; }, })
+//! #         switch!(step { "init" => { self.v = 0; Ok(()) }, })
 //! #     }
 //! # }
 //!
@@ -27,15 +28,18 @@
 //! replay_trace_str(|| D { v: 0 }, trace).unwrap();
 //! ```
 
-use crate::driver::{Driver, State, Step};
-use crate::error::{Error, ReplayError};
+use crate::driver::{Driver, ExtractState, State, Step};
+use crate::error::{Error, ReplayError, StepContext, StepError};
 use serde::Deserialize;
-use similar::{ChangeTag, TextDiff};
 use std::borrow::Borrow;
 use std::time::Instant;
 use tracing::{debug, info};
 
 /// Statistics from trace replay.
+///
+/// The `duration` field includes framework overhead (trace parsing, state
+/// comparison, progress callbacks) in addition to driver execution time.
+#[must_use]
 #[derive(Debug, Clone, Default)]
 pub struct ReplayStats {
     pub traces_replayed: usize,
@@ -66,9 +70,8 @@ pub struct ReplayProgress {
 pub fn replay_traces<'a, D: Driver>(
     driver_factory: impl Fn() -> D,
     traces: impl IntoIterator<Item = &'a itf::Trace<itf::Value>>,
-) -> Result<(), Error> {
-    replay_traces_with_progress(driver_factory, traces, None)?;
-    Ok(())
+) -> Result<ReplayStats, Error> {
+    replay_traces_with_progress(driver_factory, traces, None)
 }
 
 /// Replay with progress callback, returns stats.
@@ -154,45 +157,35 @@ fn replay_single_trace<D: Driver>(
             state: state_value.clone(),
         };
 
+        let ctx = StepContext::Replay { trace: trace_idx, state: state_idx };
+
         driver
             .step(&step)
-            .map_err(|e| ReplayError::StepExecution {
-                trace: trace_idx,
-                state: state_idx,
+            .map_err(|e| StepError::StepExecution {
+                context: ctx.clone(),
                 action: action_taken.clone(),
                 reason: e.to_string(),
             })?;
 
         let spec_state =
-            D::State::from_spec(state_value).map_err(|e| ReplayError::SpecDeserialize {
-                trace: trace_idx,
-                state: state_idx,
+            D::State::from_spec(state_value).map_err(|e| StepError::SpecDeserialize {
+                context: ctx.clone(),
                 reason: e.to_string(),
             })?;
 
         let driver_state =
-            D::State::from_driver(driver).map_err(|e| ReplayError::DriverStateExtraction {
-                trace: trace_idx,
-                state: state_idx,
+            <D::State as ExtractState<D>>::from_driver(driver).map_err(|e| StepError::DriverStateExtraction {
+                context: ctx.clone(),
                 reason: e.to_string(),
             })?;
 
         if spec_state != driver_state {
-            let summary_diff = spec_state.diff(&driver_state);
-            let spec_str = format!("{spec_state:#?}");
-            let driver_str = format!("{driver_state:#?}");
-            let full_diff = unified_diff(&spec_str, &driver_str);
+            let diff = crate::driver::format_state_mismatch(&spec_state, &driver_state);
 
-            return Err(ReplayError::StateMismatch {
-                trace: trace_idx,
-                state: state_idx,
+            return Err(StepError::StateMismatch {
+                context: ctx,
                 action: action_taken,
-                diff: format!(
-                    "State differences:\n{summary_diff}\n\
-                     --- spec (TLA+)\n\
-                     +++ driver (Rust)\n\
-                     {full_diff}"
-                ),
+                diff,
             }
             .into());
         }
@@ -222,42 +215,21 @@ fn extract_mbt_vars(state: &itf::Value) -> Result<(String, itf::Value), String> 
     Ok((action_taken, nondet_picks))
 }
 
-/// Produce a unified diff between two strings.
-pub fn unified_diff(left: &str, right: &str) -> String {
-    let diff = TextDiff::from_lines(left, right);
-    let mut output = String::new();
-
-    for change in diff.iter_all_changes() {
-        let sign = match change.tag() {
-            ChangeTag::Delete => "-",
-            ChangeTag::Insert => "+",
-            ChangeTag::Equal => " ",
-        };
-        output.push_str(sign);
-        output.push_str(change.value());
-        if !change.value().ends_with('\n') {
-            output.push('\n');
-        }
-    }
-
-    output
-}
-
 /// Replay a single ITF trace from a JSON string against a Driver.
 ///
 /// Convenience function for testing with inline trace data.
 #[must_use = "returns a Result that should be checked for replay failures"]
-pub fn replay_trace_str<D: Driver>(driver_factory: impl Fn() -> D, json: &str) -> Result<(), Error> {
+pub fn replay_trace_str<D: Driver>(driver_factory: impl Fn() -> D, json: &str) -> Result<ReplayStats, Error> {
     let trace: itf::Trace<itf::Value> =
         serde_json::from_str(json).map_err(|e| ReplayError::Parse(e.to_string()))?;
     replay_traces(driver_factory, &[trace])
 }
 
 /// Parse ITF traces from a directory of `.itf.json` files.
+///
+/// Traces are sorted by file path for deterministic ordering.
 #[must_use = "returns traces that should be used for replay"]
 pub fn load_traces_from_dir(dir: &std::path::Path) -> Result<Vec<itf::Trace<itf::Value>>, Error> {
-    let mut traces = Vec::new();
-
     if !dir.is_dir() {
         return Err(ReplayError::from(crate::error::DirectoryReadError {
             path: dir.to_path_buf(),
@@ -265,6 +237,8 @@ pub fn load_traces_from_dir(dir: &std::path::Path) -> Result<Vec<itf::Trace<itf:
         })
         .into());
     }
+
+    let mut entries: Vec<(std::path::PathBuf, itf::Trace<itf::Value>)> = Vec::new();
 
     for entry in std::fs::read_dir(dir).map_err(|e| ReplayError::from(crate::error::DirectoryReadError {
         path: dir.to_path_buf(),
@@ -287,11 +261,12 @@ pub fn load_traces_from_dir(dir: &std::path::Path) -> Result<Vec<itf::Trace<itf:
             )))?;
             let trace: itf::Trace<itf::Value> = serde_json::from_str(&content)
                 .map_err(|e| ReplayError::Parse(format!("Failed to parse {}: {e}", path.display())))?;
-            traces.push(trace);
+            entries.push((path, trace));
         }
     }
 
-    Ok(traces)
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(entries.into_iter().map(|(_, t)| t).collect())
 }
 
 #[cfg(test)]
@@ -339,14 +314,14 @@ mod tests {
 
     #[test]
     fn unified_diff_identical() {
-        let result = unified_diff("hello\nworld\n", "hello\nworld\n");
+        let result = crate::driver::unified_diff("hello\nworld\n", "hello\nworld\n");
         assert!(!result.contains('+'));
         assert!(!result.contains('-'));
     }
 
     #[test]
     fn unified_diff_different() {
-        let result = unified_diff("hello\n", "world\n");
+        let result = crate::driver::unified_diff("hello\n", "world\n");
         assert!(result.contains("-hello"));
         assert!(result.contains("+world"));
     }

@@ -36,7 +36,9 @@
 //! #[derive(Debug, PartialEq, Deserialize)]
 //! struct MyState { /* TLA+ vars to compare */ }
 //!
-//! impl State<MyDriver> for MyState {
+//! impl State for MyState {}
+//!
+//! impl ExtractState<MyDriver> for MyState {
 //!     fn from_driver(driver: &MyDriver) -> Result<Self, DriverError> { /* ... */ }
 //! }
 //!
@@ -46,8 +48,8 @@
 //!     type State = MyState;
 //!     fn step(&mut self, step: &Step) -> Result<(), DriverError> {
 //!         switch!(step {
-//!             "init" => { /* init */ },
-//!             "action1" => { /* ... */ },
+//!             "init" => { /* init */ Ok(()) },
+//!             "action1" => { /* ... */ Ok(()) },
 //!         })
 //!     }
 //! }
@@ -59,6 +61,7 @@
 //! replay_traces(|| MyDriver::default(), &traces.traces)?;
 //! ```
 
+mod builder;
 pub mod driver;
 pub mod error;
 
@@ -74,11 +77,24 @@ pub mod trace_gen;
 #[cfg(feature = "trace-validation")]
 pub mod trace_validation;
 
+mod util;
+
 // Re-export core types (always available)
-pub use driver::{Driver, State, Step};
+pub use driver::{debug_diff, Driver, ExtractState, State, Step};
+pub use error::{BuilderError, DriverError, Error, TlaResult};
+
+#[cfg(any(feature = "trace-gen", feature = "trace-validation"))]
+pub use error::ApalacheError;
+#[cfg(any(feature = "replay", feature = "trace-gen"))]
+pub use error::DirectoryReadError;
 #[cfg(feature = "replay")]
-pub use driver::debug_diff;
-pub use error::{ApalacheError, BuilderError, DirectoryReadError, DriverError, Error, ReplayError, TlaResult, TraceGenError, ValidationError};
+pub use error::ReplayError;
+#[cfg(feature = "trace-gen")]
+pub use error::TraceGenError;
+#[cfg(feature = "trace-validation")]
+pub use error::ValidationError;
+#[cfg(any(feature = "replay", feature = "rpc"))]
+pub use error::{StepContext, StepError};
 
 // Re-export replay types
 #[cfg(feature = "replay")]

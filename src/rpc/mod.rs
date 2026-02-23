@@ -10,8 +10,8 @@ pub mod types;
 pub use client::{ApalacheRpcClient, RetryConfig};
 pub use types::{SpecParameters, TransitionStatus};
 
-use crate::driver::{Driver, State, Step};
-use crate::error::{Error, RpcError};
+use crate::driver::{Driver, ExtractState, State, Step};
+use crate::error::{Error, RpcError, StepContext, StepError};
 use rand::prelude::*;
 use rand::SeedableRng;
 use std::path::Path;
@@ -19,6 +19,10 @@ use std::time::Instant;
 use tracing::{debug, info};
 
 /// Statistics from interactive testing.
+///
+/// The `duration` field includes framework overhead (RPC communication, state
+/// comparison, progress callbacks) in addition to driver execution time.
+#[must_use]
 #[derive(Debug, Clone, Default)]
 pub struct InteractiveStats {
     pub runs_completed: usize,
@@ -84,83 +88,12 @@ impl Default for InteractiveConfig {
     }
 }
 
-impl InteractiveConfig {
-    pub fn builder() -> InteractiveConfigBuilder {
-        InteractiveConfigBuilder::default()
-    }
-}
-
-#[derive(Default)]
-pub struct InteractiveConfigBuilder {
-    spec: Option<std::path::PathBuf>,
-    aux_files: Option<Vec<std::path::PathBuf>>,
-    init: Option<String>,
-    next: Option<String>,
-    max_steps: Option<usize>,
-    num_runs: Option<usize>,
-    constants: Option<serde_json::Value>,
-    seed: Option<u64>,
-}
-
-impl InteractiveConfigBuilder {
-    pub fn spec(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.spec = Some(path.into());
-        self
-    }
-
-    pub fn aux_files(mut self, files: Vec<std::path::PathBuf>) -> Self {
-        self.aux_files = Some(files);
-        self
-    }
-
-    pub fn init(mut self, init: impl Into<String>) -> Self {
-        self.init = Some(init.into());
-        self
-    }
-
-    pub fn next(mut self, next: impl Into<String>) -> Self {
-        self.next = Some(next.into());
-        self
-    }
-
-    pub fn max_steps(mut self, n: usize) -> Self {
-        self.max_steps = Some(n);
-        self
-    }
-
-    pub fn num_runs(mut self, n: usize) -> Self {
-        self.num_runs = Some(n);
-        self
-    }
-
-    pub fn constants(mut self, constants: serde_json::Value) -> Self {
-        self.constants = Some(constants);
-        self
-    }
-
-    pub fn seed(mut self, seed: u64) -> Self {
-        self.seed = Some(seed);
-        self
-    }
-
-    pub fn build(self) -> Result<InteractiveConfig, crate::error::BuilderError> {
-        let defaults = InteractiveConfig::default();
-        let spec = self.spec.ok_or(crate::error::BuilderError::MissingRequiredField {
-            builder: "InteractiveConfigBuilder",
-            field: "spec",
-        })?;
-        Ok(InteractiveConfig {
-            spec,
-            aux_files: self.aux_files.unwrap_or(defaults.aux_files),
-            init: self.init.unwrap_or(defaults.init),
-            next: self.next.unwrap_or(defaults.next),
-            max_steps: self.max_steps.unwrap_or(defaults.max_steps),
-            num_runs: self.num_runs.unwrap_or(defaults.num_runs),
-            constants: self.constants.unwrap_or(defaults.constants),
-            seed: self.seed.or(defaults.seed),
-        })
-    }
-}
+crate::builder::impl_builder!(InteractiveConfig, InteractiveConfigBuilder {
+    required { spec: std::path::PathBuf }
+    optional { aux_files: Vec<std::path::PathBuf>, init: String, next: String,
+               max_steps: usize, num_runs: usize, constants: serde_json::Value }
+    optional_or { seed: u64 }
+});
 
 fn collect_spec_sources(spec: &Path, aux_files: &[std::path::PathBuf]) -> Result<Vec<String>, Error> {
     use base64::Engine;
@@ -258,9 +191,8 @@ pub async fn interactive_test<D: Driver>(
     driver_factory: impl Fn() -> D,
     client: &ApalacheRpcClient,
     config: &InteractiveConfig,
-) -> Result<(), Error> {
-    interactive_test_with_progress(driver_factory, client, config, None).await?;
-    Ok(())
+) -> Result<InteractiveStats, Error> {
+    interactive_test_with_progress(driver_factory, client, config, None).await
 }
 
 /// Interactive test with progress callback, returns stats.
@@ -271,6 +203,9 @@ pub async fn interactive_test_with_progress<D: Driver>(
     progress: Option<InteractiveProgressFn>,
 ) -> Result<InteractiveStats, Error> {
     let start = Instant::now();
+    // Spec sources are computed once; each run loads them into a fresh Apalache
+    // session because the server maintains per-session symbolic state that must
+    // be reset between runs.
     let sources = collect_spec_sources(&config.spec, &config.aux_files)?;
 
     info!(
@@ -290,22 +225,28 @@ pub async fn interactive_test_with_progress<D: Driver>(
     for run in 0..config.num_runs {
         let mut driver = driver_factory();
 
+        // Each run needs a fresh Apalache session because the server maintains
+        // per-session symbolic state that must be reset between runs.
         let load_result = client
             .load_spec(&sources, &config.init, &config.next, &[])
             .await?;
 
         let session = load_result.session_id.clone();
 
+        let ctx = RunContext {
+            client,
+            session: &session,
+            load_result: &load_result,
+            config,
+            run,
+            total_runs: config.num_runs,
+            progress: &progress,
+        };
+
         let result = run_single_test(
             &mut driver,
-            client,
-            &session,
-            &load_result,
-            config,
+            &ctx,
             &mut *rng,
-            run,
-            config.num_runs,
-            &progress,
             &mut stats,
         )
         .await;
@@ -327,63 +268,66 @@ pub async fn interactive_test_with_progress<D: Driver>(
     Ok(stats)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_single_test<D: Driver>(
-    driver: &mut D,
-    client: &ApalacheRpcClient,
-    session: &str,
-    load_result: &types::LoadSpecResult,
-    config: &InteractiveConfig,
-    rng: &mut dyn RngCore,
+struct RunContext<'a> {
+    client: &'a ApalacheRpcClient,
+    session: &'a str,
+    load_result: &'a types::LoadSpecResult,
+    config: &'a InteractiveConfig,
     run: usize,
     total_runs: usize,
-    progress: &Option<InteractiveProgressFn>,
+    progress: &'a Option<InteractiveProgressFn>,
+}
+
+async fn run_single_test<D: Driver>(
+    driver: &mut D,
+    ctx: &RunContext<'_>,
+    rng: &mut dyn RngCore,
     stats: &mut InteractiveStats,
 ) -> Result<(), Error> {
-    let next_transitions = &load_result.spec_parameters.next_transitions;
+    let next_transitions = &ctx.load_result.spec_parameters.next_transitions;
 
-    if config.constants.is_object()
-        && !config
+    if ctx.config.constants.is_object()
+        && !ctx.config
             .constants
             .as_object()
             .is_none_or(|m| m.is_empty())
     {
-        let result = client
-            .assume_state(session, config.constants.clone(), true)
+        let result = ctx.client
+            .assume_state(ctx.session, ctx.config.constants.clone(), true)
             .await?;
 
         if result.status != TransitionStatus::Enabled {
-            return Err(RpcError::ConstantsUnsatisfiable { run }.into());
+            return Err(RpcError::ConstantsUnsatisfiable { run: ctx.run }.into());
         }
 
-        debug!(run, "Constants constrained via assumeState");
+        debug!(run = ctx.run, "Constants constrained via assumeState");
     }
 
-    let init_idx = load_result
+    let init_idx = ctx.load_result
         .spec_parameters
         .init_transitions
         .first()
         .map(|t| t.index)
         .unwrap_or(0);
 
-    let assume_result = client.assume_transition(session, init_idx, true).await?;
+    let assume_result = ctx.client.assume_transition(ctx.session, init_idx, true).await?;
 
     if assume_result.status != TransitionStatus::Enabled {
-        return Err(RpcError::InitDisabled { run }.into());
+        return Err(RpcError::InitDisabled { run: ctx.run }.into());
     }
 
-    let step_result = client.next_step(session).await?;
+    let step_result = ctx.client.next_step(ctx.session).await?;
     let mut current_snapshot = step_result.snapshot_id;
 
-    let query = client.query_trace(session).await?;
+    let query = ctx.client.query_trace(ctx.session).await?;
     let trace = query.trace.ok_or(RpcError::MissingStates)?;
     let init_state_json = extract_last_state(&trace)?;
     let init_itf = json_state_to_itf(&init_state_json)?;
 
-    if let Some(ref cb) = progress {
+    if let Some(ref cb) = ctx.progress {
         cb(InteractiveProgress {
-            run_index: run,
-            total_runs,
+            run_index: ctx.run,
+            total_runs: ctx.total_runs,
             step_index: 0,
             action: "init".to_string(),
         });
@@ -394,51 +338,52 @@ async fn run_single_test<D: Driver>(
         nondet_picks: itf::Value::Tuple(vec![].into()),
         state: init_itf.clone(),
     };
-    driver.step(&init_step).map_err(|e| RpcError::StepExecution {
-        run,
-        step: 0,
+
+    let step_ctx = StepContext::Rpc { run: ctx.run, step: 0 };
+    driver.step(&init_step).map_err(|e| StepError::StepExecution {
+        context: step_ctx.clone(),
         action: "init".to_string(),
         reason: e.to_string(),
     })?;
 
-    compare_states::<D>(driver, &init_itf, run, 0, "init")?;
+    compare_states::<D>(driver, &init_itf, ctx.run, 0)?;
     stats.total_steps += 1;
 
-    for step_idx in 1..config.max_steps {
+    for step_idx in 1..ctx.config.max_steps {
         let mut indices: Vec<u32> = next_transitions.iter().map(|t| t.index).collect();
         indices.shuffle(rng);
 
         let mut chosen = None;
         for idx in indices {
-            let result = client.assume_transition(session, idx, true).await?;
+            let result = ctx.client.assume_transition(ctx.session, idx, true).await?;
 
             if result.status == TransitionStatus::Enabled {
                 chosen = Some(idx);
                 break;
             }
 
-            client.rollback(session, current_snapshot).await?;
+            ctx.client.rollback(ctx.session, current_snapshot).await?;
         }
 
         let Some(_chosen_idx) = chosen else {
-            debug!(run, step = step_idx, "No enabled transitions (deadlock)");
+            debug!(run = ctx.run, step = step_idx, "No enabled transitions (deadlock)");
             stats.deadlocks_hit += 1;
             break;
         };
 
-        let step_result = client.next_step(session).await?;
+        let step_result = ctx.client.next_step(ctx.session).await?;
         current_snapshot = step_result.snapshot_id;
 
-        let query = client.query_trace(session).await?;
+        let query = ctx.client.query_trace(ctx.session).await?;
         let trace = query.trace.ok_or(RpcError::MissingStates)?;
         let state_json = extract_last_state(&trace)?;
         let state_itf = json_state_to_itf(&state_json)?;
         let action_taken = extract_action(&state_json);
 
-        if let Some(ref cb) = progress {
+        if let Some(ref cb) = ctx.progress {
             cb(InteractiveProgress {
-                run_index: run,
-                total_runs,
+                run_index: ctx.run,
+                total_runs: ctx.total_runs,
                 step_index: step_idx,
                 action: action_taken.clone(),
             });
@@ -450,14 +395,14 @@ async fn run_single_test<D: Driver>(
             state: state_itf.clone(),
         };
 
-        driver.step(&step).map_err(|e| RpcError::StepExecution {
-            run,
-            step: step_idx,
+        let step_ctx = StepContext::Rpc { run: ctx.run, step: step_idx };
+        driver.step(&step).map_err(|e| StepError::StepExecution {
+            context: step_ctx.clone(),
             action: action_taken.clone(),
             reason: e.to_string(),
         })?;
 
-        compare_states::<D>(driver, &state_itf, run, step_idx, &action_taken)?;
+        compare_states::<D>(driver, &state_itf, ctx.run, step_idx)?;
         stats.total_steps += 1;
     }
 
@@ -487,42 +432,26 @@ fn compare_states<D: Driver>(
     spec_itf_state: &itf::Value,
     run: usize,
     step: usize,
-    action: &str,
 ) -> Result<(), Error> {
-    let spec_state = D::State::from_spec(spec_itf_state).map_err(|e| RpcError::SpecDeserialize {
-        run,
-        step,
+    let ctx = StepContext::Rpc { run, step };
+
+    let spec_state = D::State::from_spec(spec_itf_state).map_err(|e| StepError::SpecDeserialize {
+        context: ctx.clone(),
         reason: e.to_string(),
     })?;
 
-    let driver_state = D::State::from_driver(driver).map_err(|e| RpcError::DriverStateExtraction {
-        run,
-        step,
+    let driver_state = <D::State as ExtractState<D>>::from_driver(driver).map_err(|e| StepError::DriverStateExtraction {
+        context: ctx.clone(),
         reason: e.to_string(),
     })?;
 
     if spec_state != driver_state {
-        let summary_diff = spec_state.diff(&driver_state);
-        let spec_str = format!("{spec_state:#?}");
-        let driver_str = format!("{driver_state:#?}");
+        let diff = crate::driver::format_state_mismatch(&spec_state, &driver_state);
 
-        let full_diff = {
-            #[cfg(feature = "replay")]
-            { crate::replay::unified_diff(&spec_str, &driver_str) }
-            #[cfg(not(feature = "replay"))]
-            { format!("--- spec (TLA+)\n{spec_str}\n+++ driver (Rust)\n{driver_str}") }
-        };
-
-        return Err(RpcError::StateMismatch {
-            run,
-            step,
-            action: action.to_string(),
-            diff: format!(
-                "State differences:\n{summary_diff}\n\
-                 --- spec (TLA+)\n\
-                 +++ driver (Rust)\n\
-                 {full_diff}"
-            ),
+        return Err(StepError::StateMismatch {
+            context: ctx,
+            action: "".to_string(),
+            diff,
         }
         .into());
     }

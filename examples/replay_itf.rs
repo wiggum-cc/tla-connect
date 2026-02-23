@@ -16,7 +16,9 @@ struct CounterState {
     counter: i64,
 }
 
-impl State<CounterDriver> for CounterState {
+impl State for CounterState {}
+
+impl ExtractState<CounterDriver> for CounterState {
     fn from_driver(driver: &CounterDriver) -> Result<Self, DriverError> {
         Ok(CounterState {
             counter: driver.value,
@@ -42,12 +44,15 @@ impl Driver for CounterDriver {
         switch!(step {
             "init" => {
                 self.value = 0;
+                Ok(())
             },
             "increment" => {
                 self.value += 1;
+                Ok(())
             },
             "decrement" => {
                 self.value = self.value.saturating_sub(1);
+                Ok(())
             },
         })
     }
@@ -57,8 +62,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = ApalacheConfig::builder()
         .spec("specs/Counter.tla")
         .inv("TraceComplete")
-        .max_traces(10)
-        .max_length(20)
+        .max_traces(10usize)
+        .max_length(20usize)
         .mode(ApalacheMode::Simulate)
         .build()?;
 
@@ -67,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Generated {} traces", generated.traces.len());
 
     println!("Replaying traces against CounterDriver...");
-    replay_traces(CounterDriver::default, &generated.traces)?;
+    let _stats = replay_traces(CounterDriver::default, &generated.traces)?;
     println!("All traces replayed successfully!");
 
     Ok(())

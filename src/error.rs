@@ -3,12 +3,14 @@
 //! Provides structured error types instead of anyhow for better
 //! library ergonomics and pattern matching.
 
+#[cfg(any(feature = "replay", feature = "trace-gen", feature = "trace-validation", feature = "rpc"))]
 use std::path::PathBuf;
 use thiserror::Error;
 
 /// Shared error for Apalache CLI execution failures.
 ///
 /// Used by both `TraceGenError` and `ValidationError` to avoid duplication.
+#[cfg(any(feature = "trace-gen", feature = "trace-validation"))]
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ApalacheError {
@@ -19,11 +21,16 @@ pub enum ApalacheError {
     /// Apalache binary not found or not executable.
     #[error("Failed to execute Apalache. Is it installed and on PATH? {0}")]
     NotFound(String),
+
+    /// Apalache timed out after the specified duration.
+    #[error("Apalache timed out after {duration:?}")]
+    Timeout { duration: std::time::Duration },
 }
 
 /// Shared error for directory read failures.
 ///
 /// Used by both `ReplayError` and `TraceGenError` to avoid duplication.
+#[cfg(any(feature = "replay", feature = "trace-gen"))]
 #[derive(Debug, Error)]
 #[error("Failed to read directory {path}: {reason}")]
 pub struct DirectoryReadError {
@@ -31,19 +38,63 @@ pub struct DirectoryReadError {
     pub reason: String,
 }
 
+/// Context for a step-level error, identifying where in a test run the error occurred.
+#[cfg(any(feature = "replay", feature = "rpc"))]
+#[derive(Debug, Clone)]
+pub enum StepContext {
+    Replay { trace: usize, state: usize },
+    Rpc { run: usize, step: usize },
+}
+
+#[cfg(any(feature = "replay", feature = "rpc"))]
+impl std::fmt::Display for StepContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StepContext::Replay { trace, state } => write!(f, "Trace {trace}, state {state}"),
+            StepContext::Rpc { run, step } => write!(f, "Run {run}, step {step}"),
+        }
+    }
+}
+
+/// Shared error for step-level failures during replay or interactive testing.
+///
+/// Consolidates the duplicated error variants from `ReplayError` and `RpcError`.
+#[cfg(any(feature = "replay", feature = "rpc"))]
+#[derive(Debug, Error)]
+pub enum StepError {
+    /// Failed to execute action on driver.
+    #[error("{context}: failed to execute action '{action}': {reason}")]
+    StepExecution { context: StepContext, action: String, reason: String },
+
+    /// Failed to deserialize spec state.
+    #[error("{context}: failed to deserialize spec state: {reason}")]
+    SpecDeserialize { context: StepContext, reason: String },
+
+    /// Failed to extract driver state.
+    #[error("{context}: failed to extract driver state: {reason}")]
+    DriverStateExtraction { context: StepContext, reason: String },
+
+    /// State mismatch between spec and driver.
+    #[error("State mismatch at {context} (action: '{action}'):\n{diff}")]
+    StateMismatch { context: StepContext, action: String, diff: String },
+}
+
 /// Top-level error type for tla-connect operations.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
     /// Error during ITF trace replay.
+    #[cfg(feature = "replay")]
     #[error("Replay error: {0}")]
     Replay(#[from] ReplayError),
 
     /// Error during Apalache trace generation.
+    #[cfg(feature = "trace-gen")]
     #[error("Trace generation error: {0}")]
     TraceGen(#[from] TraceGenError),
 
     /// Error during trace validation.
+    #[cfg(feature = "trace-validation")]
     #[error("Trace validation error: {0}")]
     Validation(#[from] ValidationError),
 
@@ -51,6 +102,11 @@ pub enum Error {
     #[cfg(feature = "rpc")]
     #[error("RPC error: {0}")]
     Rpc(#[from] RpcError),
+
+    /// Error during a step (shared between replay and RPC).
+    #[cfg(any(feature = "replay", feature = "rpc"))]
+    #[error("Step error: {0}")]
+    Step(#[from] StepError),
 
     /// Error in driver step execution.
     #[error("Driver error: {0}")]
@@ -70,6 +126,7 @@ pub enum Error {
 }
 
 /// Error during ITF trace replay.
+#[cfg(feature = "replay")]
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ReplayError {
@@ -79,40 +136,6 @@ pub enum ReplayError {
         trace: usize,
         state: usize,
         reason: String,
-    },
-
-    /// Failed to execute action on driver.
-    #[error("Trace {trace}, state {state}: failed to execute action '{action}': {reason}")]
-    StepExecution {
-        trace: usize,
-        state: usize,
-        action: String,
-        reason: String,
-    },
-
-    /// Failed to deserialize spec state.
-    #[error("Trace {trace}, state {state}: failed to deserialize spec state: {reason}")]
-    SpecDeserialize {
-        trace: usize,
-        state: usize,
-        reason: String,
-    },
-
-    /// Failed to extract driver state.
-    #[error("Trace {trace}, state {state}: failed to extract driver state: {reason}")]
-    DriverStateExtraction {
-        trace: usize,
-        state: usize,
-        reason: String,
-    },
-
-    /// State mismatch between spec and driver.
-    #[error("State mismatch at trace {trace}, state {state} (action: '{action}'):\n{diff}")]
-    StateMismatch {
-        trace: usize,
-        state: usize,
-        action: String,
-        diff: String,
     },
 
     /// ITF state is not a record.
@@ -129,6 +152,7 @@ pub enum ReplayError {
 }
 
 /// Error during Apalache trace generation.
+#[cfg(feature = "trace-gen")]
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum TraceGenError {
@@ -158,6 +182,7 @@ pub enum TraceGenError {
 }
 
 /// Error during trace validation (Approach 3).
+#[cfg(feature = "trace-validation")]
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ValidationError {
@@ -224,6 +249,18 @@ pub enum ValidationError {
     /// IO error during validation.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Cannot emit after StateEmitter has been finished.
+    #[error("Cannot emit after StateEmitter has been finished")]
+    EmitterFinished,
+
+    /// Inconsistent array element types.
+    #[error("Inconsistent array element types at field '{field}': expected {expected}, got {found}")]
+    InconsistentArrayType {
+        field: String,
+        expected: String,
+        found: String,
+    },
 }
 
 /// Error during RPC communication with Apalache server.
@@ -270,40 +307,6 @@ pub enum RpcError {
     /// Constants unsatisfiable.
     #[error("Run {run}: Constant constraints are unsatisfiable")]
     ConstantsUnsatisfiable { run: usize },
-
-    /// State mismatch.
-    #[error("State mismatch at run {run}, step {step} (action: '{action}'):\n{diff}")]
-    StateMismatch {
-        run: usize,
-        step: usize,
-        action: String,
-        diff: String,
-    },
-
-    /// Failed to execute action.
-    #[error("Run {run}, step {step}: failed to execute action '{action}': {reason}")]
-    StepExecution {
-        run: usize,
-        step: usize,
-        action: String,
-        reason: String,
-    },
-
-    /// Failed to deserialize spec state.
-    #[error("Run {run}, step {step}: failed to deserialize spec state: {reason}")]
-    SpecDeserialize {
-        run: usize,
-        step: usize,
-        reason: String,
-    },
-
-    /// Failed to extract driver state.
-    #[error("Run {run}, step {step}: failed to extract driver state: {reason}")]
-    DriverStateExtraction {
-        run: usize,
-        step: usize,
-        reason: String,
-    },
 
     /// Trace missing states.
     #[error("Trace has no states")]

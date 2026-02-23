@@ -49,13 +49,13 @@ impl ApalacheRpcClient {
     /// Create a new client. `url` should be e.g. `http://localhost:8822`.
     /// The `/rpc` path is appended automatically.
     #[must_use = "returns a Result containing the client"]
-    pub async fn new(url: &str) -> Result<Self, Error> {
-        Self::with_retry_config(url, RetryConfig::default()).await
+    pub fn new(url: &str) -> Result<Self, Error> {
+        Self::with_retry_config(url, RetryConfig::default())
     }
 
     /// Create a new client with custom retry configuration.
     #[must_use = "returns a Result containing the client"]
-    pub async fn with_retry_config(url: &str, retry_config: RetryConfig) -> Result<Self, Error> {
+    pub fn with_retry_config(url: &str, retry_config: RetryConfig) -> Result<Self, Error> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()

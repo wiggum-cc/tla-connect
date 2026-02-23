@@ -61,6 +61,9 @@ pub struct ApalacheConfig {
     /// Whether to keep the output directory after `GeneratedTraces` is dropped.
     /// Only relevant when `out_dir` is None (temp directory).
     pub keep_outputs: bool,
+
+    /// Timeout for the Apalache subprocess. If None, no timeout is applied.
+    pub timeout: Option<std::time::Duration>,
 }
 
 impl Default for ApalacheConfig {
@@ -76,101 +79,17 @@ impl Default for ApalacheConfig {
             apalache_bin: "apalache-mc".into(),
             out_dir: None,
             keep_outputs: false,
+            timeout: None,
         }
     }
 }
 
-impl ApalacheConfig {
-    pub fn builder() -> ApalacheConfigBuilder {
-        ApalacheConfigBuilder::default()
-    }
-}
-
-#[derive(Default)]
-pub struct ApalacheConfigBuilder {
-    spec: Option<PathBuf>,
-    inv: Option<String>,
-    max_traces: Option<usize>,
-    max_length: Option<usize>,
-    view: Option<String>,
-    cinit: Option<String>,
-    mode: Option<ApalacheMode>,
-    apalache_bin: Option<String>,
-    out_dir: Option<PathBuf>,
-    keep_outputs: Option<bool>,
-}
-
-impl ApalacheConfigBuilder {
-    pub fn spec(mut self, path: impl Into<PathBuf>) -> Self {
-        self.spec = Some(path.into());
-        self
-    }
-
-    pub fn inv(mut self, inv: impl Into<String>) -> Self {
-        self.inv = Some(inv.into());
-        self
-    }
-
-    pub fn max_traces(mut self, n: usize) -> Self {
-        self.max_traces = Some(n);
-        self
-    }
-
-    pub fn max_length(mut self, n: usize) -> Self {
-        self.max_length = Some(n);
-        self
-    }
-
-    pub fn view(mut self, view: impl Into<String>) -> Self {
-        self.view = Some(view.into());
-        self
-    }
-
-    pub fn cinit(mut self, cinit: impl Into<String>) -> Self {
-        self.cinit = Some(cinit.into());
-        self
-    }
-
-    pub fn mode(mut self, mode: ApalacheMode) -> Self {
-        self.mode = Some(mode);
-        self
-    }
-
-    pub fn apalache_bin(mut self, bin: impl Into<String>) -> Self {
-        self.apalache_bin = Some(bin.into());
-        self
-    }
-
-    pub fn out_dir(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.out_dir = Some(dir.into());
-        self
-    }
-
-    pub fn keep_outputs(mut self, keep: bool) -> Self {
-        self.keep_outputs = Some(keep);
-        self
-    }
-
-    pub fn build(self) -> Result<ApalacheConfig, crate::error::BuilderError> {
-        let defaults = ApalacheConfig::default();
-        let spec = self.spec.ok_or(crate::error::BuilderError::MissingRequiredField {
-            builder: "ApalacheConfigBuilder",
-            field: "spec",
-        })?;
-        Ok(ApalacheConfig {
-            spec,
-            inv: self.inv.unwrap_or(defaults.inv),
-            max_traces: self.max_traces.unwrap_or(defaults.max_traces),
-            max_length: self.max_length.unwrap_or(defaults.max_length),
-            view: self.view.or(defaults.view),
-            cinit: self.cinit.or(defaults.cinit),
-            mode: self.mode.unwrap_or(defaults.mode),
-            apalache_bin: self.apalache_bin.unwrap_or(defaults.apalache_bin),
-            out_dir: self.out_dir.or(defaults.out_dir),
-            keep_outputs: self.keep_outputs.unwrap_or(defaults.keep_outputs),
-        })
-    }
-}
+crate::builder::impl_builder!(ApalacheConfig, ApalacheConfigBuilder {
+    required { spec: PathBuf }
+    optional { inv: String, max_traces: usize, max_length: usize,
+               mode: ApalacheMode, apalache_bin: String, keep_outputs: bool }
+    optional_or { view: String, cinit: String, out_dir: PathBuf, timeout: std::time::Duration }
+});
 
 /// Apalache execution mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,9 +195,8 @@ pub fn generate_traces(config: &ApalacheConfig) -> Result<GeneratedTraces, Error
     );
     debug!("Command: {:?}", cmd);
 
-    let output = cmd
-        .output()
-        .map_err(|e| TraceGenError::from(crate::error::ApalacheError::NotFound(e.to_string())))?;
+    let output = crate::util::run_with_timeout(&mut cmd, config.timeout)
+        .map_err(TraceGenError::from)?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

@@ -17,7 +17,7 @@ categories = ["development-tools::testing", "science"]
 default = ["replay", "trace-gen", "trace-validation"]
 
 # Core replay functionality (ITF trace replay against Driver)
-replay = ["dep:similar"]
+replay = []
 
 # Apalache CLI trace generation
 trace-gen = ["dep:tempfile"]
@@ -48,8 +48,8 @@ thiserror = "2"
 # Logging
 tracing = "0.1"
 
-# Diff output for state mismatches (replay feature)
-similar = { version = "2", optional = true }
+# Diff output for state mismatches
+similar = "2"
 
 # Temp directory for Apalache output (trace-gen, trace-validation features)
 tempfile = { version = "3", optional = true }
@@ -72,3 +72,15 @@ rayon = { version = "1.10", optional = true }
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 wiremock = "0.6"
+
+[[example]]
+name = "interactive_rpc"
+required-features = ["rpc"]
+
+[[example]]
+name = "replay_itf"
+required-features = ["replay", "trace-gen"]
+
+[[example]]
+name = "validate_ndjson"
+required-features = ["trace-validation"]

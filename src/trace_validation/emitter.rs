@@ -53,7 +53,7 @@ impl StateEmitter {
             serde_json::Value::String(action.to_string()),
         );
 
-        let writer = self.writer.as_mut().expect("emitter already finished");
+        let writer = self.writer.as_mut().ok_or(ValidationError::EmitterFinished)?;
         serde_json::to_writer(&mut *writer, &obj)?;
         writer
             .write_all(b"\n")

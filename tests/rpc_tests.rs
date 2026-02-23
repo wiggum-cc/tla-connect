@@ -13,7 +13,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 #[tokio::test]
 async fn test_client_creation() {
     let mock_server = MockServer::start().await;
-    let client = ApalacheRpcClient::new(&mock_server.uri()).await;
+    let client = ApalacheRpcClient::new(&mock_server.uri());
     assert!(client.is_ok());
 }
 
@@ -27,7 +27,7 @@ async fn test_ping_success() {
         .mount(&mock_server)
         .await;
 
-    let client = ApalacheRpcClient::new(&mock_server.uri()).await.unwrap();
+    let client = ApalacheRpcClient::new(&mock_server.uri()).unwrap();
     let result = client.ping().await;
     assert!(result.is_ok());
 }
@@ -42,7 +42,7 @@ async fn test_ping_server_error() {
         .mount(&mock_server)
         .await;
 
-    let client = ApalacheRpcClient::new(&mock_server.uri()).await.unwrap();
+    let client = ApalacheRpcClient::new(&mock_server.uri()).unwrap();
     let result = client.ping().await;
     assert!(result.is_err());
 }
@@ -75,7 +75,7 @@ async fn test_load_spec_success() {
         .mount(&mock_server)
         .await;
 
-    let client = ApalacheRpcClient::new(&mock_server.uri()).await.unwrap();
+    let client = ApalacheRpcClient::new(&mock_server.uri()).unwrap();
     let result = client
         .load_spec(&["base64content".to_string()], "Init", "Next", &[])
         .await;
@@ -105,7 +105,7 @@ async fn test_json_rpc_error_handling() {
         .mount(&mock_server)
         .await;
 
-    let client = ApalacheRpcClient::new(&mock_server.uri()).await.unwrap();
+    let client = ApalacheRpcClient::new(&mock_server.uri()).unwrap();
     let result = client
         .load_spec(&[], "Init", "Next", &[])
         .await;
@@ -147,7 +147,6 @@ async fn test_retry_on_network_error() {
     };
 
     let client = ApalacheRpcClient::with_retry_config(&mock_server.uri(), retry_config)
-        .await
         .unwrap();
 
     let result = client

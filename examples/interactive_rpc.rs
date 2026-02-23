@@ -16,7 +16,9 @@ struct CounterState {
     counter: i64,
 }
 
-impl State<CounterDriver> for CounterState {
+impl State for CounterState {}
+
+impl ExtractState<CounterDriver> for CounterState {
     fn from_driver(driver: &CounterDriver) -> Result<Self, DriverError> {
         Ok(CounterState {
             counter: driver.value,
@@ -41,12 +43,15 @@ impl Driver for CounterDriver {
         switch!(step {
             "init" => {
                 self.value = 0;
+                Ok(())
             },
             "increment" => {
                 self.value += 1;
+                Ok(())
             },
             "decrement" => {
                 self.value = self.value.saturating_sub(1);
+                Ok(())
             },
         })
     }
@@ -55,19 +60,19 @@ impl Driver for CounterDriver {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Connecting to Apalache server at http://localhost:8822...");
-    let client = ApalacheRpcClient::new("http://localhost:8822").await?;
+    let client = ApalacheRpcClient::new("http://localhost:8822")?;
 
     let config = InteractiveConfig::builder()
         .spec("specs/Counter.tla")
         .init("Init")
         .next("Next")
-        .num_runs(50)
-        .max_steps(100)
-        .seed(42)
+        .num_runs(50usize)
+        .max_steps(100usize)
+        .seed(42u64)
         .build()?;
 
     println!("Running {} interactive test runs...", config.num_runs);
-    interactive_test(CounterDriver::default, &client, &config).await?;
+    let _stats = interactive_test(CounterDriver::default, &client, &config).await?;
     println!("All runs completed successfully!");
 
     Ok(())

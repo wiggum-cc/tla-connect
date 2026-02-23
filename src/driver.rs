@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```
-//! use tla_connect::{Driver, State, Step, DriverError, switch};
+//! use tla_connect::{Driver, State, ExtractState, Step, DriverError, switch};
 //! use serde::Deserialize;
 //!
 //! #[derive(Debug, PartialEq, Deserialize)]
@@ -18,7 +18,9 @@
 //!     value: i64,
 //! }
 //!
-//! impl State<CounterDriver> for CounterState {
+//! impl State for CounterState {}
+//!
+//! impl ExtractState<CounterDriver> for CounterState {
 //!     fn from_driver(driver: &CounterDriver) -> Result<Self, DriverError> {
 //!         Ok(CounterState { counter: driver.value })
 //!     }
@@ -29,8 +31,8 @@
 //!
 //!     fn step(&mut self, step: &Step) -> Result<(), DriverError> {
 //!         switch!(step {
-//!             "init" => { self.value = 0; },
-//!             "increment" => { self.value += 1; },
+//!             "init" => { self.value = 0; Ok(()) },
+//!             "increment" => { self.value += 1; Ok(()) },
 //!         })
 //!     }
 //! }
@@ -38,6 +40,7 @@
 
 use crate::error::DriverError;
 use serde::de::DeserializeOwned;
+use similar::{ChangeTag, TextDiff};
 use std::fmt::Debug;
 
 /// A single step from an Apalache-generated ITF trace.
@@ -72,7 +75,7 @@ pub struct Step {
 /// factory closure must be `Sync` and the resulting driver must be `Send`.
 pub trait Driver: Sized {
     /// The state type used for comparing TLA+ spec state with Rust state.
-    type State: State<Self>;
+    type State: State + ExtractState<Self>;
 
     /// Execute a single step from the TLA+ trace on the Rust implementation.
     ///
@@ -82,13 +85,10 @@ pub trait Driver: Sized {
 
 /// State comparison between TLA+ spec and Rust implementation.
 ///
-/// Deserializes from ITF `Value` (spec side) and extracts from the Driver (Rust side).
-/// Only include fields that should be compared — intentionally exclude fields
-/// where spec and implementation have valid semantic differences.
-pub trait State<D>: PartialEq + DeserializeOwned + Debug {
-    /// Extract the comparable state from the Rust driver.
-    fn from_driver(driver: &D) -> Result<Self, DriverError>;
-
+/// Deserializes from ITF `Value` (spec side). Only include fields that should
+/// be compared — intentionally exclude fields where spec and implementation
+/// have valid semantic differences.
+pub trait State: PartialEq + DeserializeOwned + Debug {
     /// Deserialize the spec state from an ITF Value.
     ///
     /// The default implementation uses serde deserialization via `itf::Value`,
@@ -139,14 +139,51 @@ pub trait State<D>: PartialEq + DeserializeOwned + Debug {
     }
 }
 
+/// Extract the comparable state from the Rust driver.
+///
+/// Separated from [`State`] so that `State` does not require a generic
+/// parameter for the driver type, making it easier to use in contexts
+/// that only need deserialization and comparison.
+pub trait ExtractState<D>: State {
+    /// Extract the comparable state from the Rust driver.
+    fn from_driver(driver: &D) -> Result<Self, DriverError>;
+}
+
+/// Produce a unified diff between two strings.
+pub fn unified_diff(left: &str, right: &str) -> String {
+    let diff = TextDiff::from_lines(left, right);
+    let mut output = String::new();
+
+    for change in diff.iter_all_changes() {
+        let sign = match change.tag() {
+            ChangeTag::Delete => "-",
+            ChangeTag::Insert => "+",
+            ChangeTag::Equal => " ",
+        };
+        output.push_str(sign);
+        output.push_str(change.value());
+        if !change.value().ends_with('\n') {
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
+/// Format a state mismatch between spec and driver states for error reporting.
+pub fn format_state_mismatch<S: State>(spec: &S, driver: &S) -> String {
+    let summary = spec.diff(driver);
+    let full = unified_diff(&format!("{spec:#?}"), &format!("{driver:#?}"));
+    format!("State differences:\n{summary}\n--- spec (TLA+)\n+++ driver (Rust)\n{full}")
+}
+
 /// Helper to create a unified diff between two Debug-formatted values.
 ///
 /// Useful for implementing custom `State::diff` methods.
-#[cfg(feature = "replay")]
 pub fn debug_diff<T: Debug, U: Debug>(left: &T, right: &U) -> String {
     let left_str = format!("{left:#?}");
     let right_str = format!("{right:#?}");
-    crate::replay::unified_diff(&left_str, &right_str)
+    unified_diff(&left_str, &right_str)
 }
 
 /// Dispatch a TLA+ action to the corresponding Rust code.
@@ -157,24 +194,22 @@ pub fn debug_diff<T: Debug, U: Debug>(left: &T, right: &U) -> String {
 /// # Usage
 ///
 /// The first argument must be a variable name (identifier) bound to a `&Step`.
+/// Each arm body must evaluate to `Result<(), DriverError>`.
 ///
 /// ```ignore
 /// tla_connect::switch!(step {
-///     "init" => { /* initialization */ },
-///     "request_success" => { self.cb.record_success(); },
-///     "tick" => { let _ = self.cb.allows_request(); },
+///     "init" => { /* initialization */ Ok(()) },
+///     "request_success" => { self.cb.record_success(); Ok(()) },
+///     "tick" => { let _ = self.cb.allows_request(); Ok(()) },
 /// })
 /// ```
 #[macro_export]
 macro_rules! switch {
     ($step:ident { $( $action:literal => $body:expr ),+ $(,)? }) => {{
-        #[allow(unreachable_code)]
-        {
-            let __tla_step: &$crate::Step = $step;
-            match __tla_step.action_taken.as_str() {
-                $( $action => { $body; Ok(()) }, )+
-                other => Err($crate::DriverError::UnknownAction(other.to_string())),
-            }
+        let __tla_step: &$crate::Step = $step;
+        match __tla_step.action_taken.as_str() {
+            $( $action => { $body }, )+
+            other => Err($crate::DriverError::UnknownAction(other.to_string())),
         }
     }};
 }

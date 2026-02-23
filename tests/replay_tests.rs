@@ -8,7 +8,9 @@ struct TestState {
     counter: i64,
 }
 
-impl State<TestDriver> for TestState {
+impl State for TestState {}
+
+impl ExtractState<TestDriver> for TestState {
     fn from_driver(driver: &TestDriver) -> Result<Self, DriverError> {
         Ok(TestState {
             counter: driver.value,
@@ -33,12 +35,15 @@ impl Driver for TestDriver {
         switch!(step {
             "init" => {
                 self.value = 0;
+                Ok(())
             },
             "increment" => {
                 self.value += 1;
+                Ok(())
             },
             "decrement" => {
                 self.value -= 1;
+                Ok(())
             },
         })
     }
@@ -124,7 +129,9 @@ fn test_replay_with_nondet_picks() {
         counter: i64,
     }
 
-    impl State<DriverWithNondet> for StateWithValue {
+    impl State for StateWithValue {}
+
+    impl ExtractState<DriverWithNondet> for StateWithValue {
         fn from_driver(driver: &DriverWithNondet) -> Result<Self, DriverError> {
             Ok(StateWithValue {
                 counter: driver.value,
@@ -143,6 +150,7 @@ fn test_replay_with_nondet_picks() {
             switch!(step {
                 "init" => {
                     self.value = 0;
+                    Ok(())
                 },
                 "add" => {
                     if let itf::Value::Record(ref rec) = step.nondet_picks {
@@ -150,6 +158,7 @@ fn test_replay_with_nondet_picks() {
                             self.value += amount.to_string().parse::<i64>().unwrap_or(0);
                         }
                     }
+                    Ok(())
                 },
             })
         }

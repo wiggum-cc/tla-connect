@@ -47,6 +47,9 @@ pub struct TraceValidatorConfig {
 
     /// Path to the Apalache binary (default: "apalache-mc").
     pub apalache_bin: String,
+
+    /// Timeout for the Apalache subprocess. If None, no timeout is applied.
+    pub timeout: Option<std::time::Duration>,
 }
 
 impl Default for TraceValidatorConfig {
@@ -58,73 +61,16 @@ impl Default for TraceValidatorConfig {
             inv: "TraceFinished".into(),
             cinit: "TraceConstInit".into(),
             apalache_bin: "apalache-mc".into(),
+            timeout: None,
         }
     }
 }
 
-impl TraceValidatorConfig {
-    pub fn builder() -> TraceValidatorConfigBuilder {
-        TraceValidatorConfigBuilder::default()
-    }
-}
-
-#[derive(Default)]
-pub struct TraceValidatorConfigBuilder {
-    trace_spec: Option<PathBuf>,
-    init: Option<String>,
-    next: Option<String>,
-    inv: Option<String>,
-    cinit: Option<String>,
-    apalache_bin: Option<String>,
-}
-
-impl TraceValidatorConfigBuilder {
-    pub fn trace_spec(mut self, path: impl Into<PathBuf>) -> Self {
-        self.trace_spec = Some(path.into());
-        self
-    }
-
-    pub fn init(mut self, init: impl Into<String>) -> Self {
-        self.init = Some(init.into());
-        self
-    }
-
-    pub fn next(mut self, next: impl Into<String>) -> Self {
-        self.next = Some(next.into());
-        self
-    }
-
-    pub fn inv(mut self, inv: impl Into<String>) -> Self {
-        self.inv = Some(inv.into());
-        self
-    }
-
-    pub fn cinit(mut self, cinit: impl Into<String>) -> Self {
-        self.cinit = Some(cinit.into());
-        self
-    }
-
-    pub fn apalache_bin(mut self, bin: impl Into<String>) -> Self {
-        self.apalache_bin = Some(bin.into());
-        self
-    }
-
-    pub fn build(self) -> Result<TraceValidatorConfig, crate::error::BuilderError> {
-        let defaults = TraceValidatorConfig::default();
-        let trace_spec = self.trace_spec.ok_or(crate::error::BuilderError::MissingRequiredField {
-            builder: "TraceValidatorConfigBuilder",
-            field: "trace_spec",
-        })?;
-        Ok(TraceValidatorConfig {
-            trace_spec,
-            init: self.init.unwrap_or(defaults.init),
-            next: self.next.unwrap_or(defaults.next),
-            inv: self.inv.unwrap_or(defaults.inv),
-            cinit: self.cinit.unwrap_or(defaults.cinit),
-            apalache_bin: self.apalache_bin.unwrap_or(defaults.apalache_bin),
-        })
-    }
-}
+crate::builder::impl_builder!(TraceValidatorConfig, TraceValidatorConfigBuilder {
+    required { trace_spec: PathBuf }
+    optional { init: String, next: String, inv: String, cinit: String, apalache_bin: String }
+    optional_or { timeout: std::time::Duration }
+});
 
 /// Validates Rust execution traces against TLA+ specs using Apalache.
 ///
@@ -202,9 +148,8 @@ pub fn validate_trace(config: &TraceValidatorConfig, trace_file: &Path) -> Resul
 
     debug!("Apalache command: {:?}", cmd);
 
-    let output = cmd
-        .output()
-        .map_err(|e| ValidationError::from(crate::error::ApalacheError::NotFound(e.to_string())))?;
+    let output = crate::util::run_with_timeout(&mut cmd, config.timeout)
+        .map_err(ValidationError::from)?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -392,34 +337,45 @@ fn infer_snowcat_record_type(value: &serde_json::Value) -> Result<String, Error>
     let sorted: BTreeMap<_, _> = obj.iter().collect();
     let mut fields = Vec::new();
     for (key, val) in &sorted {
-        let ty = infer_snowcat_type(val);
+        let ty = infer_snowcat_type(val, key)?;
         fields.push(format!("{key}: {ty}"));
     }
 
     Ok(format!("{{{}}}", fields.join(", ")))
 }
 
-fn infer_snowcat_type(value: &serde_json::Value) -> String {
+fn infer_snowcat_type(value: &serde_json::Value, field: &str) -> Result<String, Error> {
     match value {
-        serde_json::Value::Bool(_) => "Bool".to_string(),
-        serde_json::Value::Number(_) => "Int".to_string(),
-        serde_json::Value::String(_) => "Str".to_string(),
+        serde_json::Value::Bool(_) => Ok("Bool".to_string()),
+        serde_json::Value::Number(_) => Ok("Int".to_string()),
+        serde_json::Value::String(_) => Ok("Str".to_string()),
         serde_json::Value::Array(arr) => {
-            if let Some(first) = arr.first() {
-                format!("Seq({})", infer_snowcat_type(first))
-            } else {
-                "Seq(Int)".to_string()
+            if arr.is_empty() {
+                return Ok("Seq(Int)".to_string());
             }
+            let first_type = infer_snowcat_type(&arr[0], field)?;
+            for (i, elem) in arr.iter().enumerate().skip(1) {
+                let elem_type = infer_snowcat_type(elem, field)?;
+                if elem_type != first_type {
+                    return Err(ValidationError::InconsistentArrayType {
+                        field: format!("{field}[{i}]"),
+                        expected: first_type,
+                        found: elem_type,
+                    }
+                    .into());
+                }
+            }
+            Ok(format!("Seq({})", first_type))
         }
         serde_json::Value::Object(obj) => {
             let sorted: BTreeMap<_, _> = obj.iter().collect();
-            let fields: Vec<String> = sorted
+            let fields: Result<Vec<String>, Error> = sorted
                 .iter()
-                .map(|(k, v)| format!("{k}: {}", infer_snowcat_type(v)))
+                .map(|(k, v)| Ok(format!("{k}: {}", infer_snowcat_type(v, &format!("{field}.{k}"))?)))
                 .collect();
-            format!("{{{}}}", fields.join(", "))
+            Ok(format!("{{{}}}", fields?.join(", ")))
         }
-        serde_json::Value::Null => "Str".to_string(),
+        serde_json::Value::Null => Ok("Str".to_string()),
     }
 }
 
@@ -591,16 +547,22 @@ mod tests {
 
     #[test]
     fn infer_snowcat_type_primitives() {
-        assert_eq!(infer_snowcat_type(&json!(true)), "Bool");
-        assert_eq!(infer_snowcat_type(&json!(42)), "Int");
-        assert_eq!(infer_snowcat_type(&json!("hi")), "Str");
-        assert_eq!(infer_snowcat_type(&json!(null)), "Str");
+        assert_eq!(infer_snowcat_type(&json!(true), "f").unwrap(), "Bool");
+        assert_eq!(infer_snowcat_type(&json!(42), "f").unwrap(), "Int");
+        assert_eq!(infer_snowcat_type(&json!("hi"), "f").unwrap(), "Str");
+        assert_eq!(infer_snowcat_type(&json!(null), "f").unwrap(), "Str");
     }
 
     #[test]
     fn infer_snowcat_type_array() {
-        assert_eq!(infer_snowcat_type(&json!([1, 2])), "Seq(Int)");
-        assert_eq!(infer_snowcat_type(&json!([])), "Seq(Int)");
+        assert_eq!(infer_snowcat_type(&json!([1, 2]), "f").unwrap(), "Seq(Int)");
+        assert_eq!(infer_snowcat_type(&json!([]), "f").unwrap(), "Seq(Int)");
+    }
+
+    #[test]
+    fn infer_snowcat_type_mixed_array_rejected() {
+        let result = infer_snowcat_type(&json!([1, "hello"]), "f");
+        assert!(result.is_err());
     }
 
     #[test]
