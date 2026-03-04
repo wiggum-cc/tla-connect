@@ -174,7 +174,7 @@ fn parse_apalache_output(
         }
 
         Some(0) => Ok(TraceResult::Invalid {
-            reason: "Apalache completed without violating TraceFinished — \
+            reason: "Apalache completed without violating TraceFinished – \
                      the trace could not be fully replayed against the spec"
                 .to_string(),
         }),

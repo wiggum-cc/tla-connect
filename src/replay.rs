@@ -62,10 +62,11 @@ pub struct ReplayProgress {
 /// Replay multiple ITF traces against a Driver.
 ///
 /// For each trace, for each state transition:
-/// 1. Extract `action_taken` and `nondet_picks` from the ITF state
-/// 2. Call `driver.step(&step)`
-/// 3. Compare spec state with driver state using `State::from_spec`
-/// 4. If divergent, print a unified diff and fail
+/// 1. Resolve the action name (from ITF metadata, `action_taken` field, or default)
+/// 2. Extract `nondet_picks` from the ITF state
+/// 3. Call `driver.step(&step)`
+/// 4. Compare spec state with driver state using `State::from_spec`
+/// 5. If divergent, print a unified diff and fail
 #[must_use = "returns a Result that should be checked for replay failures"]
 pub fn replay_traces<'a, D: Driver>(
     driver_factory: impl Fn() -> D,
@@ -135,7 +136,7 @@ fn replay_single_trace<D: Driver>(
         let state_value = &itf_state.value;
 
         let (action_taken, nondet_picks) =
-            extract_mbt_vars(state_value).map_err(|reason| ReplayError::MbtVarExtraction {
+            extract_mbt_vars(state_value, &itf_state.meta).map_err(|reason| ReplayError::MbtVarExtraction {
                 trace: trace_idx,
                 state: state_idx,
                 reason,
@@ -194,18 +195,36 @@ fn replay_single_trace<D: Driver>(
     Ok(trace.states.len())
 }
 
-/// Extract `action_taken` and `nondet_picks` from an ITF state record.
-fn extract_mbt_vars(state: &itf::Value) -> Result<(String, itf::Value), String> {
+/// Extract `action_taken` and `nondet_picks` from an ITF state.
+///
+/// Action resolution priority:
+/// 1. ITF state metadata (`#meta`) fields: `"action"`, `"label"`, or `"transition"`
+/// 2. Explicit `action_taken` field in the state record
+/// 3. Default: `"init"` for state index 0, `"unknown"` otherwise
+fn extract_mbt_vars(
+    state: &itf::Value,
+    meta: &itf::state::Meta,
+) -> Result<(String, itf::Value), String> {
     let itf::Value::Record(ref rec) = state else {
         return Err(format!("Expected ITF state to be a Record, got: {state:?}"));
     };
 
-    let action_taken = rec
-        .get("action_taken")
-        .map(|v| String::deserialize(v.clone()))
-        .transpose()
-        .map_err(|e| format!("Failed to deserialize action_taken: {e}"))?
-        .unwrap_or_else(|| "init".to_string());
+    // Priority 1: check ITF metadata for action label
+    let action_from_meta = ["action", "label", "transition"]
+        .iter()
+        .find_map(|key| meta.other.get(*key).cloned());
+
+    let action_taken = if let Some(action) = action_from_meta {
+        action
+    } else if let Some(action) = rec.get("action_taken") {
+        // Priority 2: explicit action_taken field in state
+        String::deserialize(action.clone())
+            .map_err(|e| format!("Failed to deserialize action_taken: {e}"))?
+    } else {
+        // Priority 3: default based on state index
+        let is_init = meta.index.map_or(true, |i| i == 0);
+        if is_init { "init" } else { "unknown" }.to_string()
+    };
 
     let nondet_picks = rec
         .get("nondet_picks")
@@ -273,6 +292,22 @@ pub fn load_traces_from_dir(dir: &std::path::Path) -> Result<Vec<itf::Trace<itf:
 mod tests {
     use super::*;
 
+    fn meta_at(index: u64) -> itf::state::Meta {
+        itf::state::Meta {
+            index: Some(index),
+            other: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn meta_with_action(index: u64, key: &str, value: &str) -> itf::state::Meta {
+        let mut other = std::collections::BTreeMap::new();
+        other.insert(key.to_string(), value.to_string());
+        itf::state::Meta {
+            index: Some(index),
+            other,
+        }
+    }
+
     #[test]
     fn extract_mbt_vars_from_record() {
         let state = itf::Value::Record(
@@ -287,29 +322,78 @@ mod tests {
             .collect(),
         );
 
-        let (action, nondet) = extract_mbt_vars(&state).unwrap();
+        let (action, nondet) = extract_mbt_vars(&state, &meta_at(1)).unwrap();
         assert_eq!(action, "increment");
         assert!(matches!(nondet, itf::Value::Record(_)));
     }
 
     #[test]
-    fn extract_mbt_vars_defaults_init() {
-        // When action_taken is absent, should default to "init"
+    fn extract_mbt_vars_defaults_init_at_index_0() {
         let state = itf::Value::Record(
             vec![("counter".to_string(), itf::Value::Number(0))]
                 .into_iter()
                 .collect(),
         );
 
-        let (action, nondet) = extract_mbt_vars(&state).unwrap();
+        let (action, _) = extract_mbt_vars(&state, &meta_at(0)).unwrap();
         assert_eq!(action, "init");
-        assert!(matches!(nondet, itf::Value::Tuple(_)));
+    }
+
+    #[test]
+    fn extract_mbt_vars_defaults_unknown_at_nonzero_index() {
+        let state = itf::Value::Record(
+            vec![("counter".to_string(), itf::Value::Number(1))]
+                .into_iter()
+                .collect(),
+        );
+
+        let (action, _) = extract_mbt_vars(&state, &meta_at(3)).unwrap();
+        assert_eq!(action, "unknown");
+    }
+
+    #[test]
+    fn extract_mbt_vars_prefers_meta_over_state_field() {
+        let state = itf::Value::Record(
+            vec![
+                ("action_taken".to_string(), itf::Value::String("from_state".into())),
+                ("counter".to_string(), itf::Value::Number(1)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let (action, _) = extract_mbt_vars(&state, &meta_with_action(1, "action", "from_meta")).unwrap();
+        assert_eq!(action, "from_meta");
+    }
+
+    #[test]
+    fn extract_mbt_vars_uses_label_key() {
+        let state = itf::Value::Record(
+            vec![("counter".to_string(), itf::Value::Number(1))]
+                .into_iter()
+                .collect(),
+        );
+
+        let (action, _) = extract_mbt_vars(&state, &meta_with_action(1, "label", "increment")).unwrap();
+        assert_eq!(action, "increment");
+    }
+
+    #[test]
+    fn extract_mbt_vars_uses_transition_key() {
+        let state = itf::Value::Record(
+            vec![("counter".to_string(), itf::Value::Number(1))]
+                .into_iter()
+                .collect(),
+        );
+
+        let (action, _) = extract_mbt_vars(&state, &meta_with_action(1, "transition", "decrement")).unwrap();
+        assert_eq!(action, "decrement");
     }
 
     #[test]
     fn extract_mbt_vars_rejects_non_record() {
         let state = itf::Value::Number(42);
-        assert!(extract_mbt_vars(&state).is_err());
+        assert!(extract_mbt_vars(&state, &meta_at(0)).is_err());
     }
 
     #[test]

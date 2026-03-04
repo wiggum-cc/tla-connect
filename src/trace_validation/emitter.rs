@@ -90,7 +90,7 @@ impl Drop for StateEmitter {
             if self.count > 0 {
                 tracing::warn!(
                     count = self.count,
-                    "StateEmitter dropped without calling finish() — flushing buffered output"
+                    "StateEmitter dropped without calling finish() – flushing buffered output"
                 );
             }
             let _ = self.flush_inner();

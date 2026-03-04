@@ -10,9 +10,9 @@
 ///
 /// # Field categories
 ///
-/// - `required { field: Type }` — `build()` returns an error if not set
-/// - `optional { field: Type }` — uses `unwrap_or(defaults.field)` for non-Option fields
-/// - `optional_or { field: Type }` — uses `.or(defaults.field)` for `Option<T>` config fields
+/// - `required { field: Type }` – `build()` returns an error if not set
+/// - `optional { field: Type }` – uses `unwrap_or(defaults.field)` for non-Option fields
+/// - `optional_or { field: Type }` – uses `.or(defaults.field)` for `Option<T>` config fields
 ///
 /// Note: For `usize` fields, callers must use suffixed literals (e.g., `10usize`)
 /// because `i32 -> usize` has no `Into` impl.

@@ -158,7 +158,22 @@ fn json_state_to_itf(state: &serde_json::Value) -> Result<itf::Value, Error> {
     serde_json::from_value(state.clone()).map_err(|e| RpcError::StateConversion(e.to_string()).into())
 }
 
-fn extract_action(state: &serde_json::Value) -> String {
+/// Resolve the action name for a chosen transition.
+///
+/// Priority: transition label from spec parameters > `action_taken` field in state > "unknown".
+fn resolve_action(
+    chosen_idx: u32,
+    next_transitions: &[types::Transition],
+    state: &serde_json::Value,
+) -> String {
+    // First: use the transition label from the spec parameters
+    if let Some(transition) = next_transitions.iter().find(|t| t.index == chosen_idx) {
+        if let Some(label) = transition.labels.first() {
+            return label.clone();
+        }
+    }
+
+    // Fallback: read action_taken from state (for specs that define it explicitly)
     state
         .get("action_taken")
         .and_then(|v| v.as_str())
@@ -365,7 +380,7 @@ async fn run_single_test<D: Driver>(
             ctx.client.rollback(ctx.session, current_snapshot).await?;
         }
 
-        let Some(_chosen_idx) = chosen else {
+        let Some(chosen_idx) = chosen else {
             debug!(run = ctx.run, step = step_idx, "No enabled transitions (deadlock)");
             stats.deadlocks_hit += 1;
             break;
@@ -378,7 +393,7 @@ async fn run_single_test<D: Driver>(
         let trace = query.trace.ok_or(RpcError::MissingStates)?;
         let state_json = extract_last_state(&trace)?;
         let state_itf = json_state_to_itf(&state_json)?;
-        let action_taken = extract_action(&state_json);
+        let action_taken = resolve_action(chosen_idx, next_transitions, &state_json);
 
         if let Some(ref cb) = ctx.progress {
             cb(InteractiveProgress {

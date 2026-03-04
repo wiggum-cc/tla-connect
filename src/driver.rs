@@ -57,7 +57,7 @@ pub struct Step {
     /// Nondeterministic picks made by this step (ITF Value for proper type handling).
     pub nondet_picks: itf::Value,
 
-    /// Full TLA+ state after this step — an `itf::Value::Record` containing
+    /// Full TLA+ state after this step – an `itf::Value::Record` containing
     /// all state variables. Used for state comparison via `State::from_spec`.
     pub state: itf::Value,
 }
@@ -86,7 +86,7 @@ pub trait Driver: Sized {
 /// State comparison between TLA+ spec and Rust implementation.
 ///
 /// Deserializes from ITF `Value` (spec side). Only include fields that should
-/// be compared — intentionally exclude fields where spec and implementation
+/// be compared – intentionally exclude fields where spec and implementation
 /// have valid semantic differences.
 pub trait State: PartialEq + DeserializeOwned + Debug {
     /// Deserialize the spec state from an ITF Value.
