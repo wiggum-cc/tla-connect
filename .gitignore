@@ -19,3 +19,4 @@ Thumbs.db
 # Test output
 *.profdata
 *.profraw
+_apalache-out/
